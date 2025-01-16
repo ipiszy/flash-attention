@@ -38,6 +38,7 @@ public:
   // Mainloop derived types
   using CollectiveMainloop = CollectiveMainloop_;
   using TileShape_MNK = typename CollectiveMainloop::TileShape_MNK;
+  using TileShape_MNK_VO = typename CollectiveMainloop::TileShape_MNK_VO;
   using TiledMmaSdP = typename CollectiveMainloop::TiledMmaSdP;
   using TiledMmadKV = typename CollectiveMainloop::TiledMmadKV;
   using ArchTag = typename CollectiveMainloop::ArchTag;
@@ -345,7 +346,7 @@ public:
                                  !dKV_swapAB ? 2 : 1 > (TileShape_MNK{}));
         Tensor tdVrdV =
             partition_fragment_C(tiled_mma_dKV, select < !dKV_swapAB ? 1 : 2,
-                                 !dKV_swapAB ? 2 : 1 > (TileShape_MNK{}));
+                                 !dKV_swapAB ? 2 : 1 > (TileShape_MNK_VO{}));
         collective_mainloop.mma(params.mainloop, pipeline_q, pipeline_do,
                                 smem_pipe_read, tdKrdK, tdVrdV,
                                 threadIdx.x - NumCopyThreads, work_idx,

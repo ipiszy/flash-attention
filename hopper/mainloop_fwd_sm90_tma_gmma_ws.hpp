@@ -83,11 +83,12 @@ template <typename Ktraits, bool Is_causal, typename Seqlen_traits>
 struct CollectiveMainloopFwd {
 
   using Element = typename Ktraits::Element;
-  using TileShape_MNK = typename Ktraits::TileShape_MNK;
+  using TileShape_MNK = typename Ktraits::TileShape_MNK_QK;
+  using TileShape_MNK_VO = typename Ktraits::TileShape_MNK_VO;
   using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
   static constexpr int kStages = Ktraits::kStages;
-  static constexpr int kHeadDim = Ktraits::kHeadDim;
+  static constexpr int kHeadDim = Ktraits::kHeadDimQK;
 
   using GmemTiledCopyQ = cute::SM90_TMA_LOAD;
   using GmemTiledCopyKV =
@@ -120,7 +121,7 @@ struct CollectiveMainloopFwd {
       make_tensor(make_gmem_ptr(static_cast<Element const *>(nullptr)),
                   repeat_like(typename Seqlen_traits::StrideT{}, int32_t(0)),
                   typename Seqlen_traits::StrideT{}),
-      take<0, 2>(SmemLayoutV{}), select<1, 2>(TileShape_MNK{}),
+      take<0, 2>(SmemLayoutV{}), select<1, 2>(TileShape_MNK_VO{}),
       size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
   static constexpr int NumMmaThreads = size(typename Ktraits::TiledMma0{});
@@ -176,7 +177,7 @@ struct CollectiveMainloopFwd {
     Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), args.layout_V);
     TMA_V tma_load_V = make_tma_copy(
         GmemTiledCopyKV{}, mV, SmemLayoutV{}(_, _, _0{}),
-        select<1, 2>(TileShape_MNK{}),
+        select<1, 2>(TileShape_MNK_VO{}),
         size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
     return {args.layout_Q,
             args.layout_K,
@@ -261,7 +262,7 @@ struct CollectiveMainloopFwd {
     Tensor gK = seqlen_traits_k.get_local_tile_tensor(
         mK, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb); // (N, K, _)
     Tensor gV = seqlen_traits_k.get_local_tile_tensor(
-        mV, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb); // (N, K, _)
+        mV, select<1, 2>(TileShape_MNK_VO{}), bidh_kv, bidb); // (N, K, _)
 
     Tensor sQ_x =
         make_tensor(sQ.data(), make_layout(sQ.layout(), Layout<_1>{}));
@@ -413,7 +414,7 @@ struct CollectiveMainloopFwd {
     Tensor gK = seqlen_traits_k.get_local_tile_tensor(
         mK, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb); // (N, K, _)
     Tensor gV = seqlen_traits_k.get_local_tile_tensor(
-        mV, select<1, 2>(TileShape_MNK{}), bidh_kv, bidb); // (N, K, _)
+        mV, select<1, 2>(TileShape_MNK_VO{}), bidh_kv, bidb); // (N, K, _)
 
     Tensor sQ_x =
         make_tensor(sQ.data(), make_layout(sQ.layout(), Layout<_1>{}));
@@ -1190,7 +1191,7 @@ struct CollectiveMainloopFwd {
         Tensor tSrS =
             partition_fragment_C(tiled_mma0, select<0, 1>(TileShape_MNK{}));
         consumer_wait(pipeline_k, smem_pipe_read);
-        if constexpr (kHeadDim == 256) {
+        if constexpr (kHeadDim > 128) {
           warp_scheduler_barrier_sync();
         }
         flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(

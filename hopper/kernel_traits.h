@@ -59,9 +59,9 @@ struct SharedStorageQKVOVt {
 };
 
 // If Share_Q_K_smem is true, that forces Is_Q_in_regs to be true
-template <int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, int kStages_,
-          bool Is_Q_in_regs_ = false, int kClusterM_ = 1,
-          typename elem_type = cutlass::half_t>
+template <int kHeadDimQK_, int kHeadDimVO_, int kBlockM_, int kBlockN_,
+          int kNWarps_, int kStages_, bool Is_Q_in_regs_ = false,
+          int kClusterM_ = 1, typename elem_type = cutlass::half_t>
 struct Flash_fwd_kernel_traits {
   using Element = elem_type;
   using ElementAccum = float;
@@ -82,9 +82,12 @@ struct Flash_fwd_kernel_traits {
 
   static constexpr int kBlockM = kBlockM_;
   static constexpr int kBlockN = kBlockN_;
-  static constexpr int kHeadDim = kHeadDim_;
-  static_assert(kHeadDim % 32 == 0);
-  using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+  static constexpr int kHeadDimQK = kHeadDimQK_;
+  static constexpr int kHeadDimVO = kHeadDimVO_;
+  static_assert(kHeadDimQK % 32 == 0);
+  static_assert(kHeadDimVO % 32 == 0);
+  using TileShape_MNK_QK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimQK>>;
+  using TileShape_MNK_VO = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimVO>>;
 
   static constexpr int kClusterM = kClusterM_;
   using ClusterShape_MNK = Shape<Int<kClusterM>, _1, _1>;
@@ -96,54 +99,58 @@ struct Flash_fwd_kernel_traits {
       std::conditional_t<
           Is_Q_in_regs,
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum,
-                                              TileShape_MNK>()),
+                                              TileShape_MNK_QK>()),
           decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum,
-                                              TileShape_MNK>())>{},
+                                              TileShape_MNK_QK>())>{},
       AtomLayoutMNK{}));
   using TiledMma1 = decltype(cute::make_tiled_mma(
       cute::GMMA::rs_op_selector<Element, Element, ElementAccum,
-                                 decltype(select<0, 2, 1>(TileShape_MNK{})),
+                                 decltype(select<0, 2, 1>(TileShape_MNK_VO{})),
                                  GMMA::Major::K, GMMA::Major::MN>(),
       AtomLayoutMNK{}));
 
   using SmemLayoutAtomQ =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
-  using SmemLayoutQ =
-      decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<0>(TileShape_MNK_QK{})),
+               decltype(cute::get<2>(TileShape_MNK_QK{}))>());
+  using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{},
+                                             select<0, 2>(TileShape_MNK_QK{})));
 
   using SmemLayoutAtomK =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<1>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
+               GMMA::Major::K, Element,
+               decltype(cute::get<1>(TileShape_MNK_QK{})),
+               decltype(cute::get<2>(TileShape_MNK_QK{}))>());
   using SmemLayoutK = decltype(tile_to_shape(
       SmemLayoutAtomK{},
-      make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}),
+      make_shape(shape<1>(TileShape_MNK_QK{}), shape<2>(TileShape_MNK_QK{}),
                  Int<kStages>{})));
 
   using SmemLayoutAtomV =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<1>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
+               GMMA::Major::K, Element,
+               decltype(cute::get<1>(TileShape_MNK_VO{})),
+               decltype(cute::get<2>(TileShape_MNK_VO{}))>());
   using SmemLayoutV = decltype(tile_to_shape(
-      SmemLayoutAtomV{}, make_shape(get<1>(TileShape_MNK{}),
-                                    get<2>(TileShape_MNK{}), Int<kStages>{})));
+      SmemLayoutAtomV{},
+      make_shape(get<1>(TileShape_MNK_VO{}), get<2>(TileShape_MNK_VO{}),
+                 Int<kStages>{})));
 
   // Note this is the transpose in terms of the view, not in terms of memory.
   using SmemLayoutVt = decltype(composition(
-      SmemLayoutV{},
-      make_ordered_layout(make_shape(get<2>(TileShape_MNK{}),
-                                     get<1>(TileShape_MNK{}), Int<kStages>{}),
-                          Step<_2, _1, _3>{})));
+      SmemLayoutV{}, make_ordered_layout(make_shape(get<2>(TileShape_MNK_VO{}),
+                                                    get<1>(TileShape_MNK_VO{}),
+                                                    Int<kStages>{}),
+                                         Step<_2, _1, _3>{})));
 
   using SmemLayoutAtomO =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GMMA::Major::K, OutputType,
-               decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
-  using SmemLayoutO =
-      decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShape_MNK{})));
+               decltype(cute::get<0>(TileShape_MNK_VO{})),
+               decltype(cute::get<2>(TileShape_MNK_VO{}))>());
+  using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{},
+                                             select<0, 2>(TileShape_MNK_VO{})));
 
   using SmemCopyAtomQ = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
 
@@ -182,8 +189,12 @@ struct Flash_fwd_kernel_traits_fp8 {
   static constexpr int kBlockM = kBlockM_;
   static constexpr int kBlockN = kBlockN_;
   static constexpr int kHeadDim = kHeadDim_;
+  static constexpr int kHeadDimQK = kHeadDim_;
+  static constexpr int kHeadDimVO = kHeadDim_;
   static_assert(kHeadDim % 32 == 0);
   using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+  using TileShape_MNK_QK = TileShape_MNK;
+  using TileShape_MNK_VO = TileShape_MNK;
 
   static constexpr int kClusterM = kClusterM_;
   using ClusterShape_MNK = Shape<Int<kClusterM>, _1, _1>;
@@ -521,8 +532,8 @@ struct SharedStorageQKVdOdKVSeqqPar<
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_,
-          bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
+template <int kHeadDimQK_, int kHeadDimVO_, int kBlockM_, int kBlockN_,
+          int kNWarps_, bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
           int AtomLayoutMSdP = 1, int AtomLayoutNdKV = 2, int AtomLayoutMdQ = 1,
           int kClusterN_ = 1, typename elem_type = cutlass::half_t>
 struct Flash_bwd_kernel_traits {
@@ -543,9 +554,12 @@ struct Flash_bwd_kernel_traits {
 
   static constexpr int kBlockM = kBlockM_;
   static constexpr int kBlockN = kBlockN_;
-  static constexpr int kHeadDim = kHeadDim_;
-  static_assert(kHeadDim % 32 == 0);
-  using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+  static constexpr int kHeadDimQK = kHeadDimQK_;
+  static constexpr int kHeadDimVO = kHeadDimVO_;
+  static_assert(kHeadDimQK % 32 == 0);
+  static_assert(kHeadDimVO % 32 == 0);
+  using TileShape_MNK_QK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimQK>>;
+  using TileShape_MNK_VO = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimVO>>;
 
   static constexpr int kClusterN = kClusterN_;
   using ClusterShape_MNK = Shape<_1, Int<kClusterN>, _1>;
@@ -564,8 +578,9 @@ struct Flash_bwd_kernel_traits {
 
   using TileShapeAtomSdP = std::conditional_t<
       !SdP_swapAB,
-      Shape<Int<kBlockM>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDim>>,
-      Shape<Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kBlockM>, Int<kHeadDim>>>;
+      Shape<Int<kBlockM>, Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kHeadDimQK>>,
+      Shape<Int<kBlockN / (2 / AtomLayoutMSdP)>, Int<kBlockM>,
+            Int<kHeadDimQK>>>;
   using AtomLayoutSdP = std::conditional_t<
       !SdP_swapAB,
       Layout<Shape<Int<AtomLayoutMSdP>, Int<2 / AtomLayoutMSdP>, _1>>,
@@ -577,8 +592,9 @@ struct Flash_bwd_kernel_traits {
 
   using TileShapeAtomdKV = std::conditional_t<
       !dKV_swapAB,
-      Shape<Int<kBlockN>, Int<kHeadDim / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
-      Shape<Int<kHeadDim / (2 / AtomLayoutNdKV)>, Int<kBlockN>, Int<kBlockM>>>;
+      Shape<Int<kBlockN>, Int<kHeadDimVO / (2 / AtomLayoutNdKV)>, Int<kBlockM>>,
+      Shape<Int<kHeadDimVO / (2 / AtomLayoutNdKV)>, Int<kBlockN>,
+            Int<kBlockM>>>;
   using AtomLayoutdKV = std::conditional_t<
       !dKV_swapAB,
       Layout<Shape<Int<AtomLayoutNdKV>, Int<2 / AtomLayoutNdKV>, _1>>,
@@ -596,8 +612,8 @@ struct Flash_bwd_kernel_traits {
 
   using TileShapeAtomdQ = std::conditional_t<
       !dQ_swapAB,
-      Shape<Int<kBlockM>, Int<kHeadDim / (2 / AtomLayoutMdQ)>, Int<kBlockN>>,
-      Shape<Int<kHeadDim / (2 / AtomLayoutMdQ)>, Int<kBlockM>, Int<kBlockN>>
+      Shape<Int<kBlockM>, Int<kHeadDimQK / (2 / AtomLayoutMdQ)>, Int<kBlockN>>,
+      Shape<Int<kHeadDimQK / (2 / AtomLayoutMdQ)>, Int<kBlockM>, Int<kBlockN>>
       // Shape<Int<kBlockM>, Int<kHeadDim >, Int<kBlockN>>,
       // Shape<Int<kHeadDim>, Int<kBlockM>, Int<kBlockN>>
       >;
@@ -641,10 +657,10 @@ struct Flash_bwd_kernel_traits {
   // For the dot_do_o preprocessing kernel
   using Gmem_copy_struct = std::conditional_t<
       Has_cp_async, SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, DefaultCopy>;
-  static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
+  static constexpr int kBlockKSmem = kHeadDimQK % 64 == 0 ? 64 : 32;
   static constexpr int kGmemElemsPerLoad =
       sizeof(cute::uint128_t) / sizeof(Element);
-  static_assert(kHeadDim % kGmemElemsPerLoad == 0,
+  static_assert(kHeadDimQK % kGmemElemsPerLoad == 0,
                 "kHeadDim must be a multiple of kGmemElemsPerLoad");
   // Using kBlockKSmem instead of kHeadDim here to avoid bank conflicts, but
   // doesn't seem to affect speed in practice.
@@ -677,40 +693,45 @@ struct Flash_bwd_kernel_traits {
 
   using SmemLayoutAtomQ =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
+               GMMA::Major::K, Element,
+               decltype(cute::get<0>(TileShape_MNK_QK{})),
+               decltype(cute::get<2>(TileShape_MNK_QK{}))>());
   using SmemLayoutQ = decltype(tile_to_shape(
       SmemLayoutAtomQ{},
-      make_shape(shape<0>(TileShape_MNK{}), shape<2>(TileShape_MNK{}),
+      make_shape(shape<0>(TileShape_MNK_QK{}), shape<2>(TileShape_MNK_QK{}),
                  Int<kStages>{})));
   using SmemLayoutdO = SmemLayoutQ;
 
   using SmemLayoutAtomK =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<1>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
-  using SmemLayoutK =
-      decltype(tile_to_shape(SmemLayoutAtomK{}, select<1, 2>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<1>(TileShape_MNK_QK{})),
+               decltype(cute::get<2>(TileShape_MNK_QK{}))>());
+  using SmemLayoutK = decltype(tile_to_shape(SmemLayoutAtomK{},
+                                             select<1, 2>(TileShape_MNK_QK{})));
 
   using SmemLayoutAtomV =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<1>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
-  using SmemLayoutV =
-      decltype(tile_to_shape(SmemLayoutAtomV{}, select<1, 2>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<1>(TileShape_MNK_VO{})),
+               decltype(cute::get<2>(TileShape_MNK_VO{}))>());
+  using SmemLayoutV = decltype(tile_to_shape(SmemLayoutAtomV{},
+                                             select<1, 2>(TileShape_MNK_VO{})));
 
   using SmemLayoutAtomP =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<1>(TileShape_MNK{}))>());
-  using SmemLayoutP =
-      decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<0>(TileShape_MNK_QK{})),
+               decltype(cute::get<1>(TileShape_MNK_QK{}))>());
+  using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{},
+                                             select<0, 1>(TileShape_MNK_QK{})));
   using SmemLayoutAtomdS =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<1>(TileShape_MNK{}))>());
-  using SmemLayoutdS = decltype(tile_to_shape(SmemLayoutAtomdS{},
-                                              select<0, 1>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<0>(TileShape_MNK_QK{})),
+               decltype(cute::get<1>(TileShape_MNK_QK{}))>());
+  using SmemLayoutdS = decltype(tile_to_shape(
+      SmemLayoutAtomdS{}, select<0, 1>(TileShape_MNK_QK{})));
 
   // using SmemLayoutAtomdQacc =
   // decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K,
@@ -724,27 +745,27 @@ struct Flash_bwd_kernel_traits {
   using SmemLayoutQt = decltype(cute::composition(
       SmemLayoutQ{},
       make_layout(
-          make_shape(get<2>(TileShape_MNK{}), get<0>(TileShape_MNK{}),
+          make_shape(get<2>(TileShape_MNK_QK{}), get<0>(TileShape_MNK_QK{}),
                      Int<kStages>{}),
-          make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
+          make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDimQK>{}))));
   using SmemLayoutdOt = decltype(cute::composition(
       SmemLayoutdO{},
       make_layout(
-          make_shape(get<2>(TileShape_MNK{}), get<0>(TileShape_MNK{}),
+          make_shape(get<2>(TileShape_MNK_QK{}), get<0>(TileShape_MNK_QK{}),
                      Int<kStages>{}),
-          make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDim>{}))));
+          make_stride(Int<kBlockM>{}, _1{}, Int<kBlockM * kHeadDimQK>{}))));
   using SmemLayoutKt = decltype(cute::composition(
-      SmemLayoutK{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<1>(TileShape_MNK{})),
-                  make_stride(Int<kBlockN>{}, _1{}))));
+      SmemLayoutK{}, make_layout(make_shape(get<2>(TileShape_MNK_QK{}),
+                                            get<1>(TileShape_MNK_QK{})),
+                                 make_stride(Int<kBlockN>{}, _1{}))));
   using SmemLayoutPt = decltype(cute::composition(
-      SmemLayoutP{},
-      make_layout(make_shape(get<1>(TileShape_MNK{}), get<0>(TileShape_MNK{})),
-                  make_stride(Int<kBlockM>{}, _1{}))));
+      SmemLayoutP{}, make_layout(make_shape(get<1>(TileShape_MNK_QK{}),
+                                            get<0>(TileShape_MNK_QK{})),
+                                 make_stride(Int<kBlockM>{}, _1{}))));
   using SmemLayoutdSt = decltype(cute::composition(
-      SmemLayoutdS{},
-      make_layout(make_shape(get<1>(TileShape_MNK{}), get<0>(TileShape_MNK{})),
-                  make_stride(Int<kBlockM>{}, _1{}))));
+      SmemLayoutdS{}, make_layout(make_shape(get<1>(TileShape_MNK_QK{}),
+                                             get<0>(TileShape_MNK_QK{})),
+                                  make_stride(Int<kBlockM>{}, _1{}))));
 
   // using SmemLayoutdQacct =
   //     decltype(cute::composition(SmemLayoutdQacc{},
@@ -765,24 +786,24 @@ struct Flash_bwd_kernel_traits {
                   Layout<Shape<Int<kNThreadsdQ / 32>, Int<32>>,
                          Stride<Int<32>, _1>>{}));
   using SmemLayoutdQ = decltype(tile_to_shape(
-      SmemLayoutAtomdQ{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{})));
+      SmemLayoutAtomdQ{}, make_shape(Int<kBlockM>{}, Int<kHeadDimQK>{})));
   using SmemLayoutdQt = decltype(cute::composition(
-      SmemLayoutdQ{},
-      make_layout(make_shape(get<2>(TileShape_MNK{}), get<0>(TileShape_MNK{})),
-                  make_stride(Int<kBlockM>{}, _1{}))));
+      SmemLayoutdQ{}, make_layout(make_shape(get<2>(TileShape_MNK_QK{}),
+                                             get<0>(TileShape_MNK_QK{})),
+                                  make_stride(Int<kBlockM>{}, _1{}))));
   static constexpr int kSmemdQSize = size(SmemLayoutdQ{}) * sizeof(Element);
 
   using SmemLayoutAtomdQaccTMA =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GMMA::Major::K, ElementAccum,
-               decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<1>(TileShape_MNK{}))>());
+               decltype(cute::get<0>(TileShape_MNK_QK{})),
+               decltype(cute::get<1>(TileShape_MNK_QK{}))>());
   using SmemLayoutdQaccTMA = decltype(tile_to_shape(
-      SmemLayoutAtomdQaccTMA{}, select<0, 2>(TileShape_MNK{})));
+      SmemLayoutAtomdQaccTMA{}, select<0, 2>(TileShape_MNK_QK{})));
   using SmemLayoutdQacc = SmemLayoutdQ;
   using SmemLayoutdQacct = SmemLayoutdQt;
   using SmemLayoutdQacc2 = decltype(tile_to_shape(
-      SmemLayoutAtomdQ{}, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}, _2{})));
+      SmemLayoutAtomdQ{}, make_shape(Int<kBlockM>{}, Int<kHeadDimQK>{}, _2{})));
   // using SmemLayoutdQacc = decltype(tile_to_shape(SmemLayoutAtomdQacc{},
   // select<0, 2>(TileShape_MNK{}))); using SmemLayoutdQacct =
   //     decltype(cute::composition(SmemLayoutdQacc{},

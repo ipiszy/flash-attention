@@ -27,7 +27,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       const size_t b, const size_t seqlen_q,
                       const size_t seqlen_k, const size_t seqlen_q_rounded,
                       const size_t seqlen_k_rounded, const size_t h,
-                      const size_t h_k, const size_t d, const size_t d_rounded,
+                      const size_t h_k, const size_t d_qk, const size_t d_vo,
+                      const size_t d_qk_rounded, const size_t d_vo_rounded,
                       // device pointers
                       const at::Tensor q, const at::Tensor k,
                       const at::Tensor v, at::Tensor out, void *cu_seqlens_q_d,
@@ -91,8 +92,10 @@ void set_params_fprop(Flash_fwd_params &params,
   params.seqlen_k = seqlen_k;
   params.seqlen_q_rounded = seqlen_q_rounded;
   params.seqlen_k_rounded = seqlen_k_rounded;
-  params.d = d;
-  params.d_rounded = d_rounded;
+  params.d_qk = d_qk;
+  params.d_vo = d_vo;
+  params.d_qk_rounded = d_qk_rounded;
+  params.d_vo_rounded = d_vo_rounded;
 
   // Set the different scale values.
   params.scale_softmax = softmax_scale;
@@ -155,7 +158,8 @@ void set_params_dgrad(
     // sizes
     const size_t b, const size_t seqlen_q, const size_t seqlen_k,
     const size_t seqlen_q_rounded, const size_t seqlen_k_rounded,
-    const size_t h, const size_t h_k, const size_t d, const size_t d_rounded,
+    const size_t h, const size_t h_k, const size_t d_qk, const size_t d_vo,
+    const size_t d_qk_rounded, const size_t d_vo_rounded,
     // device pointers
     const at::Tensor q, const at::Tensor k, const at::Tensor v,
     const at::Tensor out, const at::Tensor dout, at::Tensor dq, at::Tensor dk,
@@ -165,10 +169,10 @@ void set_params_dgrad(
     int window_size_left, int window_size_right, bool deterministic) {
 
   set_params_fprop(params, b, seqlen_q, seqlen_k, seqlen_q_rounded,
-                   seqlen_k_rounded, h, h_k, d, d_rounded, q, k, v, out,
-                   cu_seqlens_q_d, cu_seqlens_k_d, nullptr, nullptr,
-                   softmax_lse_d, p_dropout, softmax_scale, window_size_left,
-                   window_size_right);
+                   seqlen_k_rounded, h, h_k, d_qk, d_vo, d_qk_rounded,
+                   d_vo_rounded, q, k, v, out, cu_seqlens_q_d, cu_seqlens_k_d,
+                   nullptr, nullptr, softmax_lse_d, p_dropout, softmax_scale,
+                   window_size_left, window_size_right);
 
   // Set the pointers and strides.
   params.do_ptr = dout.data_ptr();
@@ -208,28 +212,32 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream,
   // });
   if (!params.is_e4m3) {
     if (params.is_bf16) {
-      if (params.d == 64) {
+      if (params.d_qk == 192 && params.d_vo == 128) {
+        run_mha_fwd_<cutlass::bfloat16_t, 192, 128>(params, stream);
+      } else if (params.d_qk == 64) {
         run_mha_fwd_<cutlass::bfloat16_t, 64>(params, stream);
-      } else if (params.d == 128) {
+      } else if (params.d_qk == 128) {
         run_mha_fwd_<cutlass::bfloat16_t, 128>(params, stream);
       } else {
         run_mha_fwd_<cutlass::bfloat16_t, 256>(params, stream);
       }
     } else {
-      if (params.d == 64) {
+      if (params.d_qk == 192 && params.d_vo == 128) {
+        run_mha_fwd_<cutlass::bfloat16_t, 192, 128>(params, stream);
+      } else if (params.d_qk == 64) {
         run_mha_fwd_<cutlass::half_t, 64>(params, stream);
-      } else if (params.d == 128) {
+      } else if (params.d_qk == 128) {
         run_mha_fwd_<cutlass::half_t, 128>(params, stream);
       } else {
         run_mha_fwd_<cutlass::half_t, 256>(params, stream);
       }
     }
   } else {
-    if (params.d == 64) {
+    if (params.d_qk == 64) {
       run_mha_fwd_<cutlass::float_e4m3_t, 64>(params, stream);
-    } else if (params.d == 128) {
+    } else if (params.d_qk == 128) {
       run_mha_fwd_<cutlass::float_e4m3_t, 128>(params, stream);
-    } else if (params.d == 256) {
+    } else if (params.d_qk == 256) {
       run_mha_fwd_<cutlass::float_e4m3_t, 256>(params, stream);
     }
   }
@@ -349,7 +357,8 @@ mha_fwd(at::Tensor &q,       // batch_size x seqlen_q x num_heads x head_size
   Flash_fwd_params params;
   set_params_fprop(params, batch_size, seqlen_q, seqlen_k, seqlen_q_rounded,
                    seqlen_k_rounded, num_heads, num_heads_k, head_size,
-                   head_size_rounded, q_padded, k_padded, v_padded, out,
+                   head_size, head_size_rounded, head_size_rounded, q_padded,
+                   k_padded, v_padded, out,
                    /*cu_seqlens_q_d=*/nullptr,
                    /*cu_seqlens_k_d=*/nullptr,
                    /*seqused_k=*/nullptr, nullptr, softmax_lse.data_ptr(),
@@ -436,7 +445,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   const int batch_size = cu_seqlens_q.numel() - 1;
   int num_heads = sizes[1];
-  const int head_size_og = sizes[2];
+  const int head_size_qk = sizes[2];
+  const int head_size_vo = v.sizes()[2];
   const int num_heads_k = k.size(1);
 
   int window_size_left = -1;
@@ -451,7 +461,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   TORCH_CHECK(batch_size > 0, "batch size must be positive");
   TORCH_CHECK(
-      head_size_og <= 256,
+      head_size_qk <= 256,
+      "FlashAttention forward only supports head dimension at most 256");
+  TORCH_CHECK(
+      head_size_vo <= 256,
       "FlashAttention forward only supports head dimension at most 256");
   TORCH_CHECK(
       num_heads % num_heads_k == 0,
@@ -464,10 +477,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
     window_size_right = -1;
   }
 
-  CHECK_SHAPE(q, total_q, num_heads, head_size_og);
+  CHECK_SHAPE(q, total_q, num_heads, head_size_qk);
   const int total_k = k.size(0);
-  CHECK_SHAPE(k, total_k, num_heads_k, head_size_og);
-  CHECK_SHAPE(v, total_k, num_heads_k, head_size_og);
+  CHECK_SHAPE(k, total_k, num_heads_k, head_size_qk);
+  CHECK_SHAPE(v, total_k, num_heads_k, head_size_vo);
 
   CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
   CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
@@ -481,13 +494,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   at::Tensor q_padded, k_padded, v_padded;
-  if (head_size_og % 8 != 0) {
+  if (head_size_qk % 8 != 0) {
     q_padded = torch::nn::functional::pad(
-        q, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
+        q, torch::nn::functional::PadFuncOptions({0, 8 - head_size_qk % 8}));
     k_padded = torch::nn::functional::pad(
-        k, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
+        k, torch::nn::functional::PadFuncOptions({0, 8 - head_size_qk % 8}));
     v_padded = torch::nn::functional::pad(
-        v, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
+        v, torch::nn::functional::PadFuncOptions({0, 8 - head_size_qk % 8}));
   } else {
     q_padded = q;
     k_padded = k;
@@ -502,8 +515,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     CHECK_DEVICE(out);
     TORCH_CHECK(out.stride(-1) == 1,
                 "Output tensor must have contiguous last dimension");
-    CHECK_SHAPE(out, sizes[0], sizes[1], head_size_og);
-    if (head_size_og % 8 != 0) {
+    CHECK_SHAPE(out, sizes[0], sizes[1], head_size_vo);
+    if (head_size_vo % 8 != 0) {
       out = torch::empty_like(q_padded);
     }
   } else {
@@ -511,8 +524,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-  const int head_size = round_multiple(head_size_og, 8);
-  const int head_size_rounded = round_multiple(head_size, 32);
+  const int head_size_qk_8 = round_multiple(head_size_qk, 8);
+  const int head_size_qk_32 = round_multiple(head_size_qk_8, 32);
+  const int head_size_vo_8 = round_multiple(head_size_vo, 8);
+  const int head_size_vo_32 = round_multiple(head_size_vo_8, 32);
   const int seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
   const int seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
 
@@ -526,9 +541,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
   Flash_fwd_params params;
   set_params_fprop(
       params, batch_size, max_seqlen_q, max_seqlen_k, seqlen_q_rounded,
-      seqlen_k_rounded, num_heads, num_heads_k, head_size, head_size_rounded,
-      q_padded, k_padded, v_padded, out, cu_seqlens_q_d,
-      cu_seqlens_k.data_ptr(),
+      seqlen_k_rounded, num_heads, num_heads_k, head_size_qk_8, head_size_vo_8,
+      head_size_qk_32, head_size_vo_32, q_padded, k_padded, v_padded, out,
+      cu_seqlens_q_d, cu_seqlens_k.data_ptr(),
       seqused_k.has_value() ? seqused_k.value().data_ptr() : nullptr,
       /*p_d=*/nullptr, softmax_lse.data_ptr(),
       /*p_dropout=*/0.f, softmax_scale, window_size_left, window_size_right,
@@ -548,9 +563,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   at::Tensor out_padded = out;
-  if (head_size_og % 8 != 0) {
+  if (head_size_vo % 8 != 0) {
     out = out.index(
-        {"...", torch::indexing::Slice(torch::indexing::None, head_size_og)});
+        {"...", torch::indexing::Slice(torch::indexing::None, head_size_vo)});
     if (out_.has_value()) {
       out_.value().copy_(out);
     }
@@ -566,17 +581,19 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
   //     });
   // });
   if (!params.is_bf16) {
-    if (params.d <= 64) {
+    if (params.d_qk == 192 && params.d_vo == 128) {
+      run_mha_bwd_<cutlass::half_t, 192, 128>(params, stream);
+    } else if (params.d_qk <= 64) {
       run_mha_bwd_<cutlass::half_t, 64>(params, stream);
-    } else if (params.d <= 96) {
+    } else if (params.d_qk <= 96) {
       run_mha_bwd_<cutlass::half_t, 96>(params, stream);
     } else {
       run_mha_bwd_<cutlass::half_t, 128>(params, stream);
     }
   } else {
-    if (params.d <= 64) {
+    if (params.d_qk <= 64) {
       run_mha_bwd_<cutlass::bfloat16_t, 64>(params, stream);
-    } else if (params.d <= 96) {
+    } else if (params.d_qk <= 96) {
       run_mha_bwd_<cutlass::bfloat16_t, 96>(params, stream);
     } else {
       run_mha_bwd_<cutlass::bfloat16_t, 128>(params, stream);
@@ -744,9 +761,9 @@ std::vector<at::Tensor> mha_bwd(
 
   set_params_dgrad(
       params, batch_size, seqlen_q, seqlen_k, seqlen_q_rounded,
-      seqlen_k_rounded, num_heads, num_heads_k, head_size, head_size_rounded, q,
-      k, v, out, dout_padded, dq, dk_expanded, dv_expanded, nullptr, nullptr,
-      dq_accum.data_ptr(),
+      seqlen_k_rounded, num_heads, num_heads_k, head_size, head_size,
+      head_size_rounded, head_size_rounded, q, k, v, out, dout_padded, dq,
+      dk_expanded, dv_expanded, nullptr, nullptr, dq_accum.data_ptr(),
       // loop ? dk_accum.data_ptr() : nullptr,
       // loop ? dv_accum.data_ptr() : nullptr,
       nullptr, nullptr, softmax_lse.data_ptr(), softmax_d.data_ptr(),
@@ -760,14 +777,14 @@ std::vector<at::Tensor> mha_bwd(
       torch::empty({(seqlen_q + kBlockM - 1) / kBlockM, batch_size, num_heads},
                    opts.dtype(torch::kInt32));
   params.dq_semaphore = dq_semaphore.data_ptr<int>();
-  // printf("dq_semaphore: %p, [%d, %d, %d]\n", params.dq_semaphore, (seqlen_q +
-  // 64 - 1) / 64, batch_size, num_heads);
+  // printf("dq_semaphore: %p, [%d, %d, %d]\n", params.dq_semaphore, (seqlen_q
+  // + 64 - 1) / 64, batch_size, num_heads);
 
   if (seqlen_q > 0) {
     run_mha_bwd(params, stream);
   } else {
-    // If seqlen_q == 0, then we have an empty tensor. We need to set the output
-    // to 0.
+    // If seqlen_q == 0, then we have an empty tensor. We need to set the
+    // output to 0.
     dk_expanded.zero_();
     dv_expanded.zero_();
     softmax_d.zero_();
@@ -866,37 +883,39 @@ std::vector<at::Tensor> mha_varlen_bwd(
   const int total_q = sizes[0];
   const int batch_size = cu_seqlens_q.numel() - 1;
   const int num_heads = sizes[1];
-  const int head_size_og = dout.size(2);
-  const int head_size = sizes[2];
+  const int head_size_vo = dout.size(2);
+  const int head_size_qk = sizes[2];
   const int total_k = k.size(0);
   const int num_heads_k = k.size(1);
   TORCH_CHECK(batch_size > 0, "batch size must be positive");
-  TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
+  TORCH_CHECK(head_size_qk % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(
-      head_size <= 128,
+      head_size_qk <= 128,
       "FlashAttention backward only supports head dimension at most 128");
   TORCH_CHECK(
       num_heads % num_heads_k == 0,
       "Number of heads in key/value must divide number of heads in query");
 
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-  const int head_size_rounded =
-      head_size <= 64 ? 64 : round_multiple(head_size, 32);
+  const int head_size_qk_rounded =
+      head_size_qk <= 64 ? 64 : round_multiple(head_size_qk, 32);
+  const int head_size_vo_rounded =
+      head_size_vo <= 64 ? 64 : round_multiple(head_size_vo, 32);
   // This should match the kernel configs
-  const int kBlockM = head_size <= 64 ? 128 : (head_size < 256 ? 64 : 32);
+  const int kBlockM = head_size_qk <= 64 ? 128 : (head_size_qk < 256 ? 64 : 32);
   const int seqlen_q_rounded = round_multiple(max_seqlen_q, kBlockM);
   const int seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
   int const total_q_padded_rounded =
       round_multiple(total_q + batch_size * 128, 128);
 
-  TORCH_CHECK(head_size == round_multiple(head_size_og, 8),
-              "head_size must be head_size_og rounded to a multiple of 8");
+  // TORCH_CHECK(head_size == round_multiple(head_size_og, 8), "head_size must
+  // be head_size_og rounded to a multiple of 8");
 
-  CHECK_SHAPE(q, total_q, num_heads, head_size_og);
-  CHECK_SHAPE(k, total_k, num_heads_k, head_size_og);
-  CHECK_SHAPE(v, total_k, num_heads_k, head_size_og);
-  CHECK_SHAPE(out, total_q, num_heads, head_size);
-  CHECK_SHAPE(dout, total_q, num_heads, head_size_og);
+  CHECK_SHAPE(q, total_q, num_heads, head_size_qk);
+  CHECK_SHAPE(k, total_k, num_heads_k, head_size_qk);
+  CHECK_SHAPE(v, total_k, num_heads_k, head_size_vo);
+  CHECK_SHAPE(out, total_q, num_heads, head_size_vo);
+  CHECK_SHAPE(dout, total_q, num_heads, head_size_vo);
   CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
   CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
 
@@ -906,7 +925,7 @@ std::vector<at::Tensor> mha_varlen_bwd(
     TORCH_CHECK(dq.dtype() == q_dtype, "dq must have the same dtype as q");
     CHECK_DEVICE(dq);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
-    CHECK_SHAPE(dq, total_q, num_heads, head_size);
+    CHECK_SHAPE(dq, total_q, num_heads, head_size_qk);
   } else {
     dq = torch::empty_like(q);
   }
@@ -915,7 +934,7 @@ std::vector<at::Tensor> mha_varlen_bwd(
     TORCH_CHECK(dk.dtype() == q_dtype, "dk must have the same dtype as q");
     CHECK_DEVICE(dk);
     TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
-    CHECK_SHAPE(dk, total_k, num_heads_k, head_size);
+    CHECK_SHAPE(dk, total_k, num_heads_k, head_size_qk);
   } else {
     dk = torch::empty_like(k);
   }
@@ -924,15 +943,15 @@ std::vector<at::Tensor> mha_varlen_bwd(
     TORCH_CHECK(dv.dtype() == q_dtype, "dv must have the same dtype as q");
     CHECK_DEVICE(dv);
     TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
-    CHECK_SHAPE(dv, total_k, num_heads_k, head_size);
+    CHECK_SHAPE(dv, total_k, num_heads_k, head_size_vo);
   } else {
     dv = torch::empty_like(v);
   }
 
   at::Tensor dout_padded;
-  if (head_size_og % 8 != 0) {
+  if (head_size_vo % 8 != 0) {
     dout_padded = torch::nn::functional::pad(
-        dout, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
+        dout, torch::nn::functional::PadFuncOptions({0, 8 - head_size_vo % 8}));
   } else {
     dout_padded = dout;
   }
@@ -942,8 +961,8 @@ std::vector<at::Tensor> mha_varlen_bwd(
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
   auto opts = q.options();
-  // Need softmax_d to have total_q_padded_rounded since we want its address to
-  // be aligned by 16/8 bytes for TMA / LDG.64
+  // Need softmax_d to have total_q_padded_rounded since we want its address
+  // to be aligned by 16/8 bytes for TMA / LDG.64
   auto softmax_d =
       torch::empty({num_heads, total_q_padded_rounded}, opts.dtype(at::kFloat));
   auto softmax_lse_log2 =
@@ -951,7 +970,7 @@ std::vector<at::Tensor> mha_varlen_bwd(
   at::Tensor dq_accum;
   at::Tensor dk_accum, dv_accum;
   dq_accum =
-      torch::empty({num_heads, total_q_padded_rounded, head_size_rounded},
+      torch::empty({num_heads, total_q_padded_rounded, head_size_qk_rounded},
                    opts.dtype(at::kFloat));
   // dk_accum = torch::zeros({batch_size, seqlen_k_rounded, num_heads_k,
   // head_size_rounded}, opts.dtype(at::kFloat)); dv_accum =
@@ -960,8 +979,8 @@ std::vector<at::Tensor> mha_varlen_bwd(
 
   at::Tensor dk_expanded, dv_expanded;
   if (num_heads_k != num_heads) { // MQA / GQA
-    dk_expanded = torch::empty({total_k, num_heads, head_size}, opts);
-    dv_expanded = torch::empty({total_k, num_heads, head_size}, opts);
+    dk_expanded = torch::empty({total_k, num_heads, head_size_qk}, opts);
+    dv_expanded = torch::empty({total_k, num_heads, head_size_vo}, opts);
   } else {
     dk_expanded = dk;
     dv_expanded = dv;
@@ -971,9 +990,10 @@ std::vector<at::Tensor> mha_varlen_bwd(
 
   set_params_dgrad(
       params, batch_size, max_seqlen_q, max_seqlen_k, seqlen_q_rounded,
-      seqlen_k_rounded, num_heads, num_heads_k, head_size, head_size_rounded, q,
-      k, v, out, dout_padded, dq, dk_expanded, dv_expanded,
-      cu_seqlens_q.data_ptr(), cu_seqlens_k.data_ptr(), dq_accum.data_ptr(),
+      seqlen_k_rounded, num_heads, num_heads_k, head_size_qk, head_size_vo,
+      head_size_qk_rounded, head_size_vo_rounded, q, k, v, out, dout_padded, dq,
+      dk_expanded, dv_expanded, cu_seqlens_q.data_ptr(),
+      cu_seqlens_k.data_ptr(), dq_accum.data_ptr(),
       // loop ? dk_accum.data_ptr() : nullptr,
       // loop ? dv_accum.data_ptr() : nullptr,
       nullptr, nullptr, softmax_lse.data_ptr(), softmax_d.data_ptr(),
@@ -1002,23 +1022,25 @@ std::vector<at::Tensor> mha_varlen_bwd(
 
   // For MQA/GQA we need to sum dK and dV across the groups
   if (num_heads_k != num_heads) {
-    at::sum_out(dk,
-                at::reshape(dk_expanded, {total_k, num_heads_k,
-                                          num_heads / num_heads_k, head_size}),
-                {2});
-    at::sum_out(dv,
-                at::reshape(dv_expanded, {total_k, num_heads_k,
-                                          num_heads / num_heads_k, head_size}),
-                {2});
+    at::sum_out(
+        dk,
+        at::reshape(dk_expanded, {total_k, num_heads_k, num_heads / num_heads_k,
+                                  head_size_qk}),
+        {2});
+    at::sum_out(
+        dv,
+        at::reshape(dv_expanded, {total_k, num_heads_k, num_heads / num_heads_k,
+                                  head_size_vo}),
+        {2});
   }
 
-  if (head_size_og % 8 != 0) {
+  if (head_size_qk % 8 != 0) {
     dq = dq.index(
-        {"...", torch::indexing::Slice(torch::indexing::None, head_size_og)});
+        {"...", torch::indexing::Slice(torch::indexing::None, head_size_qk)});
     dk = dk.index(
-        {"...", torch::indexing::Slice(torch::indexing::None, head_size_og)});
+        {"...", torch::indexing::Slice(torch::indexing::None, head_size_qk)});
     dv = dv.index(
-        {"...", torch::indexing::Slice(torch::indexing::None, head_size_og)});
+        {"...", torch::indexing::Slice(torch::indexing::None, head_size_vo)});
   }
 
   return {dq, dk, dv, softmax_d, dq_accum, softmax_lse_log2};
