@@ -2,17 +2,19 @@
 
 from typing import Optional, Union
 
-import torch
-import torch.nn as nn
-
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flashattn_hopper_cuda
 
+import torch
+import torch.nn as nn
+
 # isort: on
+
 
 def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
+
 
 def _flash_attn_forward(q, k, v, softmax_scale, causal):
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
@@ -39,7 +41,7 @@ def _flash_attn_backward(
     dv,
     softmax_scale,
     causal,
-    deterministic=False
+    deterministic=False,
 ):
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
@@ -58,6 +60,7 @@ def _flash_attn_backward(
         deterministic,
     )
     return dq, dk, dv, softmax_d
+
 
 def _flash_attn_varlen_forward(
     q,
@@ -154,11 +157,7 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         out, q, k, v, out_padded, softmax_lse, S_dmask = _flash_attn_forward(
-            q,
-            k,
-            v,
-            softmax_scale,
-            causal
+            q, k, v, softmax_scale, causal
         )
         ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
         ctx.softmax_scale = softmax_scale
@@ -256,14 +255,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         return dq, dk, dv, None, None, None, None, None, None, None
 
 
-def flash_attn_func(
-    q,
-    k,
-    v,
-    softmax_scale=None,
-    causal=False,
-    deterministic=False
-):
+def flash_attn_func(q, k, v, softmax_scale=None, causal=False, deterministic=False):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
