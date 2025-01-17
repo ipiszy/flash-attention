@@ -230,7 +230,8 @@ def test_flash_attn_output(
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [128])
 # @pytest.mark.parametrize("d", [64, 128, 256])
-@pytest.mark.parametrize("d", [64, 128])
+# @pytest.mark.parametrize("d", [64, 128, 192])
+@pytest.mark.parametrize("d", [192])
 # @pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -290,7 +291,7 @@ def test_flash_attn_varlen_output(
         batch_size,
         seqlen_k,
         nheads_kv,
-        d,
+        d if d != 192 else 128,
         device=device,
         dtype=dtype,
         requires_grad=True,

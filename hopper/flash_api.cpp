@@ -498,7 +498,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     k_padded = torch::nn::functional::pad(
         k, torch::nn::functional::PadFuncOptions({0, 8 - head_size_qk % 8}));
     v_padded = torch::nn::functional::pad(
-        v, torch::nn::functional::PadFuncOptions({0, 8 - head_size_qk % 8}));
+        v, torch::nn::functional::PadFuncOptions({0, 8 - head_size_vo % 8}));
   } else {
     q_padded = q;
     k_padded = k;
@@ -515,10 +515,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
                 "Output tensor must have contiguous last dimension");
     CHECK_SHAPE(out, sizes[0], sizes[1], head_size_vo);
     if (head_size_vo % 8 != 0) {
-      out = torch::empty_like(q_padded);
+      out = torch::empty({total_k, num_heads, head_size_vo}, q.options());
     }
   } else {
-    out = torch::empty_like(q_padded);
+    out = torch::empty({total_k, num_heads, head_size_vo}, q.options());
   }
 
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
@@ -888,8 +888,8 @@ std::vector<at::Tensor> mha_varlen_bwd(
   TORCH_CHECK(batch_size > 0, "batch size must be positive");
   TORCH_CHECK(head_size_qk % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(
-      head_size_qk <= 128,
-      "FlashAttention backward only supports head dimension at most 128");
+      head_size_qk <= 192,
+      "FlashAttention backward only supports head dimension at most 192");
   TORCH_CHECK(
       num_heads % num_heads_k == 0,
       "Number of heads in key/value must divide number of heads in query");
