@@ -290,6 +290,9 @@ struct CollectiveEpilogueBwd {
       for (int k = 0; k < size(tdKVpdK); ++k) {
         tdKVpdK(k) = get<1>(tdKVcdK(_0{}, _0{}, k)) < get<1>(params.shape_dK);
       }
+      for (int k = 0; k < size(tdKVpdV); ++k) {
+        tdKVpdV(k) = get<1>(tdKVcdV(_0{}, _0{}, k)) < get<1>(params.shape_dV);
+      }
       static constexpr int kBlockN = get<1>(TileShape_MNK_QK{});
       // Clear_OOB_K must be false since we don't want to write zeros to gmem
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false,

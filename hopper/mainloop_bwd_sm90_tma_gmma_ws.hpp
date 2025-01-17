@@ -97,7 +97,7 @@ struct CollectiveMainloopBwd {
       !dKV_swapAB,
       Shape<Int<kBlockN>, Int<kHeadDim_VO / (2 / AtomLayoutNdKV)>,
             Int<kBlockM>>,
-      Shape<Int<kHeadDim>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>>;
+      Shape<Int<kHeadDim_VO>, Int<kBlockN / AtomLayoutNdKV>, Int<kBlockM>>>;
   using AtomLayoutdV = std::conditional_t<
       !dKV_swapAB,
       Layout<Shape<Int<AtomLayoutNdKV>, Int<2 / AtomLayoutNdKV>, _1>>,
