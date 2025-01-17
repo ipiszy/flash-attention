@@ -18,13 +18,14 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum,
-          bool Clear_dQaccum, bool Varlen>
+template <class TileShape_MK_QK_, class TileShape_MK_VO_, class Element,
+          class ElementAccum, bool Clear_dQaccum, bool Varlen>
 class FlashAttnBwdPreprocess {
 
 public:
   // Type Aliases
-  using TileShape_MK = TileShape_MK_;
+  using TileShape_MK = TileShape_MK_QK_;
+  using TileShape_MK_VO = TileShape_MK_VO_;
 
   static constexpr uint32_t MaxThreadsPerBlock = 256;
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
@@ -35,6 +36,7 @@ public:
   static_assert(get<1>(TileShape_MK{}) % kGmemElemsPerLoad == 0,
                 "Headdim must be a multiple of kGmemElemsPerLoad");
   static constexpr int kHeadDim = get<1>(TileShape_MK{});
+  static constexpr int kHeadDimVO = get<1>(TileShape_MK_VO{});
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem =
@@ -152,14 +154,15 @@ public:
 
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O,
                             params.stride_O)(_, _, bidh, !is_varlen ? bidb : 0);
-    Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO),
-                           TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gO =
+        local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO),
+                   TileShape_MK_VO{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mdO =
         make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O,
                     params.stride_dO)(_, _, bidh, !is_varlen ? bidb : 0);
     Tensor gdO =
         local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mdO),
-                   TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+                   TileShape_MK_VO{}, make_coord(m_block, _0{})); // (M, K)
 
     auto shape_LSE = select<0, 2, 3>(params.shape_O);
     Tensor mLSE =
@@ -180,7 +183,7 @@ public:
     Tensor tOgdO = gmem_thr_copy_O.partition_S(gdO);
     // Construct identity layout for gO
     Tensor cO = cute::make_identity_tensor(
-        TileShape_MK{}); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+        TileShape_MK_VO{}); // (BLK_M,BLK_K) -> (blk_m,blk_k)
     // Repeat the partitioning with identity layouts
     Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
     Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));

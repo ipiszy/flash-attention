@@ -42,7 +42,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps *cutlass::NumThreadsPerWarp,
   using Element = typename Ktraits::Element;
   using ElementAccum = typename Ktraits::ElementAccum;
   using SoftType = ElementAccum;
-  using TileShape_MNK = typename Ktraits::TileShape_MNK;
+  using TileShape_MNK = typename Ktraits::TileShape_MNK_VO;
   using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
   static_assert(Ktraits::Is_WS);
@@ -239,7 +239,7 @@ __global__ void __launch_bounds__(Ktraits::kNWarps *cutlass::NumThreadsPerWarp,
   static_assert(cutlass::sizeof_bits_v<Element> == 8);
   using ElementAccum = typename Ktraits::ElementAccum;
   using SoftType = ElementAccum;
-  using TileShape_MNK = typename Ktraits::TileShape_MNK;
+  using TileShape_MNK = typename Ktraits::TileShape_MNK_QK;
   using ClusterShape = typename Ktraits::ClusterShape_MNK;
 
   static_assert(Ktraits::Is_WS);

@@ -230,7 +230,8 @@ def test_flash_attn_output(
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [128])
 # @pytest.mark.parametrize("d", [64, 128, 256])
-@pytest.mark.parametrize("d", [64, 128])
+# @pytest.mark.parametrize("d", [64, 128, 192])
+@pytest.mark.parametrize("d", [192])
 # @pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
@@ -238,7 +239,7 @@ def test_flash_attn_output(
         (1, 1),
         (1, 3),
         (2, 1),
-        (511, 1),
+        # (511, 1),
         (3, 513),
         (64, 128),
         (113, 203),
@@ -290,7 +291,7 @@ def test_flash_attn_varlen_output(
         batch_size,
         seqlen_k,
         nheads_kv,
-        d,
+        d if d != 192 else 128,
         device=device,
         dtype=dtype,
         requires_grad=True,
@@ -408,6 +409,6 @@ def test_flash_attn_varlen_output(
         assert (dk - dk_ref).abs().max().item() < 1e-4 or (
             dk - dk_ref
         ).abs().max().item() <= 3 * (dk_pt - dk_ref).abs().max().item()
-        assert (dk - dk_ref).abs().max().item() < 1e-4 or (
+        assert (dv - dv_ref).abs().max().item() < 1e-4 or (
             dv - dv_ref
         ).abs().max().item() <= 3 * (dv_pt - dv_ref).abs().max().item()

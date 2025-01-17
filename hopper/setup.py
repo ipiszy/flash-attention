@@ -116,6 +116,7 @@ if not SKIP_CUDA_BUILD:
         "flash_fwd_hdim128_bf16_sm90.cu",
         "flash_fwd_hdim256_fp16_sm90.cu",
         "flash_fwd_hdim256_bf16_sm90.cu",
+        "flash_fwd_hdim192_128_bf16_sm90.cu",
         "flash_bwd_hdim64_fp16_sm90.cu",
         "flash_bwd_hdim96_fp16_sm90.cu",
         "flash_bwd_hdim128_fp16_sm90.cu",
@@ -123,6 +124,7 @@ if not SKIP_CUDA_BUILD:
         "flash_bwd_hdim64_bf16_sm90.cu",
         "flash_bwd_hdim96_bf16_sm90.cu",
         "flash_bwd_hdim128_bf16_sm90.cu",
+        "flash_bwd_hdim192_128_bf16_sm90.cu",
         "flash_fwd_hdim64_e4m3_sm90.cu",
         "flash_fwd_hdim128_e4m3_sm90.cu",
         "flash_fwd_hdim256_e4m3_sm90.cu"
@@ -144,7 +146,7 @@ if not SKIP_CUDA_BUILD:
         "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",  # printing out number of registers
         "-lineinfo",
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",  # Can toggle for debugging
-        "-DNDEBUG",  # Important, otherwise performance is severely impacted             
+        "-DNDEBUG",  # Important, otherwise performance is severely impacted
     ]
     include_dirs = [
         # Path(this_dir) / "fmha-pipeline",
