@@ -210,6 +210,8 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream,
   // HEADDIM_SWITCH(params.d, [&] {
   //     run_mha_fwd_<cutlass::half_t, kHeadSize>(params, stream);
   // });
+  printf("params.is_bf16: %d, params.d_qk: %d, params.d_vo: %d\n",
+         params.is_bf16, params.d_qk, params.d_vo);
   if (!params.is_e4m3) {
     if (params.is_bf16) {
       if (params.d_qk == 192 && params.d_vo == 128) {
@@ -222,7 +224,9 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream,
         run_mha_fwd_<cutlass::bfloat16_t, 256>(params, stream);
       }
     } else {
-      if (params.d_qk == 64) {
+      if (params.d_qk == 192 && params.d_vo == 128) {
+        run_mha_fwd_<cutlass::half_t, 192, 128>(params, stream);
+      } else if (params.d_qk == 64) {
         run_mha_fwd_<cutlass::half_t, 64>(params, stream);
       } else if (params.d_qk == 128) {
         run_mha_fwd_<cutlass::half_t, 128>(params, stream);
@@ -515,10 +519,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
                 "Output tensor must have contiguous last dimension");
     CHECK_SHAPE(out, sizes[0], sizes[1], head_size_vo);
     if (head_size_vo % 8 != 0) {
-      out = torch::empty({total_k, num_heads, head_size_vo}, q.options());
+      out = torch::empty({total_q, num_heads, head_size_vo}, q.options());
     }
   } else {
-    out = torch::empty({total_k, num_heads, head_size_vo}, q.options());
+    out = torch::empty({total_q, num_heads, head_size_vo}, q.options());
   }
 
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
@@ -579,7 +583,9 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
   //     });
   // });
   if (!params.is_bf16) {
-    if (params.d_qk <= 64) {
+    if (params.d_qk == 192 && params.d_vo == 128) {
+      run_mha_bwd_<cutlass::half_t, 192, 128>(params, stream);
+    } else if (params.d_qk <= 64) {
       run_mha_bwd_<cutlass::half_t, 64>(params, stream);
     } else if (params.d_qk <= 96) {
       run_mha_bwd_<cutlass::half_t, 96>(params, stream);

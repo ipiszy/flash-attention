@@ -17,16 +17,16 @@ namespace flash {
 
 using namespace cute;
 
-// template <int kHeadDim_, int kBlockM_, int kBlockN_, int kNWarps_, typename
-// Element_>
+// template <int kHeadDimVO_, int kBlockM_, int kBlockN_, int kNWarps_,
+// typename Element_>
 template <typename Ktraits, typename Seqlen_traits>
 struct CollectiveEpilogueFwd {
 
   using Element = typename Ktraits::OutputType;
   static constexpr int kBlockM = Ktraits::kBlockM;
   static constexpr int kBlockN = Ktraits::kBlockN;
-  static constexpr int kHeadDim = Ktraits::kHeadDimVO;
-  using TileShape_MNK = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+  static constexpr int kHeadDimVO = Ktraits::kHeadDimVO;
+  using TileShape_MNK_VO = Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDimVO>>;
 
   static constexpr int kNWarps = Ktraits::kNWarps;
   static constexpr int kNThreads = kNWarps * cutlass::NumThreadsPerWarp;
@@ -38,10 +38,11 @@ struct CollectiveEpilogueFwd {
 
   using SmemLayoutAtomO =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})),
-               decltype(cute::get<2>(TileShape_MNK{}))>());
-  using SmemLayoutO =
-      decltype(tile_to_shape(SmemLayoutAtomO{}, select<0, 2>(TileShape_MNK{})));
+               GMMA::Major::K, Element,
+               decltype(cute::get<0>(TileShape_MNK_VO{})),
+               decltype(cute::get<2>(TileShape_MNK_VO{}))>());
+  using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{},
+                                             select<0, 2>(TileShape_MNK_VO{})));
 
   using SmemCopyAtomO = Copy_Atom<cute::SM90_U32x4_STSM_N, Element>;
   using SharedStorage =
@@ -53,13 +54,13 @@ struct CollectiveEpilogueFwd {
       make_tensor(make_gmem_ptr(static_cast<Element *>(nullptr)),
                   typename Seqlen_traits::ShapeT{},
                   typename Seqlen_traits::StrideT{}),
-      SmemLayoutO{}, select<0, 2>(TileShape_MNK{}), _1{})); // no mcast for O
+      SmemLayoutO{}, select<0, 2>(TileShape_MNK_VO{}), _1{})); // no mcast for O
 
   // These are for storing the output tensor without TMA (e.g., for setting
   // output to zero and var-seq-len)
   static constexpr int kNumVecElem = ceil_div(128, sizeof_bits_v<Element>);
-  static_assert(kHeadDim % kNumVecElem == 0);
-  static constexpr int kNumThreadsPerRow = kHeadDim / kNumVecElem;
+  static_assert(kHeadDimVO % kNumVecElem == 0);
+  static constexpr int kNumThreadsPerRow = kHeadDimVO / kNumVecElem;
   static_assert(NumMmaThreads % kNumThreadsPerRow == 0);
   static constexpr int kNumRows = NumMmaThreads / kNumThreadsPerRow;
   using TiledCopyOAtom =
@@ -77,12 +78,14 @@ struct CollectiveEpilogueFwd {
   // used for rmem -> smem O copy in fp8 kernel to undo column permutation
   using ThreadLayoutrO =
       Layout<Shape<_8, Int<kBlockM / 16>, _4, _1>, Stride<_4, _32, _1, _0>>;
-  using ValueLayoutrO = Layout<Shape<_1, _2, Shape<_2, _2>, Int<kHeadDim / 16>>,
-                               Stride<_0, _2, Stride<_4, _1>, _8>>;
+  using ValueLayoutrO =
+      Layout<Shape<_1, _2, Shape<_2, _2>, Int<kHeadDimVO / 16>>,
+             Stride<_0, _2, Stride<_4, _1>, _8>>;
   using TiledCopyrO =
       decltype(make_tiled_copy(Copy_Atom<UniversalCopy<uint16_t>, Element>{},
                                ThreadLayoutrO{}, ValueLayoutrO{}));
-  using TiledCopyShaperO = Shape<_8, Int<kBlockM / 8>, _16, Int<kHeadDim / 16>>;
+  using TiledCopyShaperO =
+      Shape<_8, Int<kBlockM / 8>, _16, Int<kHeadDimVO / 16>>;
   using SmemLayoutrO =
       decltype(composition(SmemLayoutO{}, Layout<TiledCopyShaperO>{}));
 
@@ -107,7 +110,7 @@ struct CollectiveEpilogueFwd {
     Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.layout_O);
     TMA_O tma_store_O =
         make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutO{},
-                      select<0, 2>(TileShape_MNK{}), _1{}); // no mcast for O
+                      select<0, 2>(TileShape_MNK_VO{}), _1{}); // no mcast for O
     return {args.ptr_O, args.layout_O, args.ptr_LSE, args.layout_LSE,
             tma_store_O};
   }
@@ -157,7 +160,7 @@ struct CollectiveEpilogueFwd {
                               epilogue_params.layout_LSE);
     Tensor gLSE = seqlen_traits_q.get_lse_local_tile_tensor(
         mLSE, Shape<Int<kBlockM>>{}, bidh, bidb)(_, m_block);
-    Tensor caccO = cute::make_identity_tensor(select<0, 2>(TileShape_MNK{}));
+    Tensor caccO = cute::make_identity_tensor(select<0, 2>(TileShape_MNK_VO{}));
     auto thread_mma = tiled_mma.get_thread_slice(thread_idx);
     Tensor taccOcO = thread_mma.partition_C(caccO); // (MMA,MMA_M,MMA_K)
     static_assert(decltype(size<0, 0>(taccOcO))::value == 2);
@@ -183,9 +186,17 @@ struct CollectiveEpilogueFwd {
           cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
     }
     TiledCopyO gmem_tiled_copy_O;
+    if (bidh == 2 && m_block == 0 && bidb == 0 && threadIdx.x == 128) {
+      CUTE_LOG("before write_O:: m_block: %d, bidh: %d, bidb: %d\n", m_block,
+               bidh, bidb);
+      printf("==== SO ====\n");
+      print_tensor(sO);
+      printf("==== tOrO_out ====\n");
+      print_tensor(tOrO_out);
+    }
     flash::write_O<!Seqlen_traits::kUseVarSeqLen, NumCopyThreads>(
         epilogue_params.ptr_O, epilogue_params.tma_store_O, gmem_tiled_copy_O,
-        epilogue_params.layout_O, select<0, 2>(TileShape_MNK{}), sO, m_block,
+        epilogue_params.layout_O, select<0, 2>(TileShape_MNK_VO{}), sO, m_block,
         bidh, bidb, seqlen_traits_q, write_warp_idx);
   }
 
@@ -225,7 +236,7 @@ struct CollectiveEpilogueFwd {
                               epilogue_params.layout_LSE);
     Tensor gLSE = seqlen_traits_q.get_lse_local_tile_tensor(
         mLSE, Shape<Int<kBlockM>>{}, bidh, bidb)(_, m_block);
-    Tensor caccO = cute::make_identity_tensor(select<0, 2>(TileShape_MNK{}));
+    Tensor caccO = cute::make_identity_tensor(select<0, 2>(TileShape_MNK_VO{}));
     auto thread_mma = tiled_mma.get_thread_slice(thread_idx);
     Tensor taccOcO = thread_mma.partition_C(caccO); // (MMA,MMA_M,MMA_K)
     static_assert(decltype(size<0, 0>(taccOcO))::value == 2);
@@ -262,7 +273,7 @@ struct CollectiveEpilogueFwd {
         make_tensor(make_smem_ptr(shared_storage.smem_o.data()), SmemLayoutO{});
     flash::write_O<!Seqlen_traits::kUseVarSeqLen, NumCopyThreads>(
         epilogue_params.ptr_O, epilogue_params.tma_store_O, gmem_tiled_copy_O,
-        epilogue_params.layout_O, select<0, 2>(TileShape_MNK{}), sO, m_block,
+        epilogue_params.layout_O, select<0, 2>(TileShape_MNK_VO{}), sO, m_block,
         bidh, bidb, seqlen_traits_q, write_warp_idx);
   }
 
@@ -279,7 +290,8 @@ struct CollectiveEpilogueFwd {
     Tensor mO = make_tensor(make_gmem_ptr(epilogue_params.ptr_O),
                             epilogue_params.layout_O);
     Tensor gO = seqlen_traits_q.get_local_tile_tensor(
-        mO, select<0, 2>(TileShape_MNK{}), bidh, bidb)(_, _, m_block); // (M, K)
+        mO, select<0, 2>(TileShape_MNK_VO{}), bidh, bidb)(_, _,
+                                                          m_block); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(epilogue_params.ptr_LSE),
                               epilogue_params.layout_LSE);
     Tensor gLSE = seqlen_traits_q.get_lse_local_tile_tensor(
@@ -292,7 +304,7 @@ struct CollectiveEpilogueFwd {
     clear(tOrO);
     // Construct identity layout for sO
     Tensor cO = cute::make_identity_tensor(
-        select<0, 2>(TileShape_MNK{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+        select<0, 2>(TileShape_MNK_VO{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
     // Repeat the partitioning with identity layouts
     Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
     Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));

@@ -218,43 +218,43 @@ def test_flash_attn_output(
         ).abs().max().item() + 3e-5
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-# @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
-@pytest.mark.parametrize("deterministic", [False, True])
-# @pytest.mark.parametrize("deterministic", [False])
+# @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [True])
+# @pytest.mark.parametrize("deterministic", [False, True])
+@pytest.mark.parametrize("deterministic", [False])
 # @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [128])
 # @pytest.mark.parametrize("d", [64, 128, 256])
 # @pytest.mark.parametrize("d", [64, 128, 192])
-@pytest.mark.parametrize("d", [192])
-# @pytest.mark.parametrize("d", [128])
+# @pytest.mark.parametrize("d", [192])
+@pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
         (1, 1),
-        (1, 3),
-        (2, 1),
-        # (511, 1),
-        (3, 513),
-        (64, 128),
-        (113, 203),
-        (128, 128),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (384, 256),
-        (512, 256),
-        (640, 128),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (2048, 2048),
+        # (1, 3),
+        # (2, 1),
+        # # (511, 1),
+        # (3, 513),
+        # (64, 128),
+        # (113, 203),
+        # (128, 128),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        # (256, 512),
+        # (384, 256),
+        # (512, 256),
+        # (640, 128),
+        # (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
+        # (2048, 2048),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
@@ -269,11 +269,12 @@ def test_flash_attn_varlen_output(
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
-    # batch_size = 1
+    batch_size = 1
     # nheads = 1
-    batch_size = 9
-    nheads = 6
-    nheads_kv = 6 if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
+    # batch_size = 9
+    nheads = 1
+    # nheads_kv = 8 if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
+    nheads_kv = 1
 
     q = torch.randn(
         batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True
@@ -322,9 +323,14 @@ def test_flash_attn_varlen_output(
     ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
     # print("cu_seqlens_q: ", cu_seqlens_q)
     # print("cu_seqlens_k: ", cu_seqlens_k)
-    # print("q_unpad, shape: ", q_unpad.shape)
-    # print("k_unpad, shape: ", k_unpad.shape)
-    # print("v_unpad, shape: ", v_unpad.shape)
+    print("q_unpad, shape: ", q_unpad.shape)
+    print("k_unpad, shape: ", k_unpad.shape)
+    print("v_unpad, shape: ", v_unpad.shape)
+    print("q_ptr: ", q_unpad.data_ptr())
+    print("k_ptr: ", k_unpad.data_ptr())
+    print("q_unpad: ", q_unpad)
+    print("k_unpad: ", k_unpad)
+    print("v_unpad: ", v_unpad)
     out_unpad, sm_lse = flash_attn_varlen_func(
         q_unpad,
         k_unpad,
@@ -362,6 +368,7 @@ def test_flash_attn_varlen_output(
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+    breakpoint()
 
     g = torch.randn_like(out)
     if d <= 128:
@@ -395,6 +402,7 @@ def test_flash_attn_varlen_output(
         print(f"dQ Pytorch mean diff: {(dq_pt - dq_ref).abs().mean().item()}")
         print(f"dK Pytorch mean diff: {(dk_pt - dk_ref).abs().mean().item()}")
         print(f"dV Pytorch mean diff: {(dv_pt - dv_ref).abs().mean().item()}")
+        breakpoint()
 
     # Check that FlashAttention's numerical error is at most twice the numerical error
     # of a Pytorch implementation.

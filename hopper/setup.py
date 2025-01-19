@@ -1,24 +1,29 @@
 # Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
 
-import sys
-import warnings
+import ast
 import os
+import platform
 import re
 import shutil
-import ast
-from pathlib import Path
-from packaging.version import parse, Version
-import platform
-
-from setuptools import setup, find_packages
 import subprocess
+import sys
+import urllib.error
 
 import urllib.request
-import urllib.error
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+import warnings
+from pathlib import Path
 
 import torch
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
+from packaging.version import parse, Version
+
+from setuptools import find_packages, setup
+from torch.utils.cpp_extension import (
+    BuildExtension,
+    CppExtension,
+    CUDA_HOME,
+    CUDAExtension,
+)
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 # with open("../README.md", "r", encoding="utf-8") as fh:
@@ -57,7 +62,9 @@ def get_platform():
 
 
 def get_cuda_bare_metal_version(cuda_dir):
-    raw_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True)
+    raw_output = subprocess.check_output(
+        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = raw_output.split()
     release_idx = output.index("release") + 1
     bare_metal_version = parse(output[release_idx].split(",")[0])
@@ -117,6 +124,7 @@ if not SKIP_CUDA_BUILD:
         "flash_fwd_hdim256_fp16_sm90.cu",
         "flash_fwd_hdim256_bf16_sm90.cu",
         "flash_fwd_hdim192_128_bf16_sm90.cu",
+        "flash_fwd_hdim192_128_fp16_sm90.cu",
         "flash_bwd_hdim64_fp16_sm90.cu",
         "flash_bwd_hdim96_fp16_sm90.cu",
         "flash_bwd_hdim128_fp16_sm90.cu",
@@ -125,9 +133,10 @@ if not SKIP_CUDA_BUILD:
         "flash_bwd_hdim96_bf16_sm90.cu",
         "flash_bwd_hdim128_bf16_sm90.cu",
         "flash_bwd_hdim192_128_bf16_sm90.cu",
+        "flash_bwd_hdim192_128_fp16_sm90.cu",
         "flash_fwd_hdim64_e4m3_sm90.cu",
         "flash_fwd_hdim128_e4m3_sm90.cu",
-        "flash_fwd_hdim256_e4m3_sm90.cu"
+        "flash_fwd_hdim256_e4m3_sm90.cu",
     ]
     nvcc_flags = [
         "-O3",
@@ -147,6 +156,7 @@ if not SKIP_CUDA_BUILD:
         "-lineinfo",
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",  # Can toggle for debugging
         "-DNDEBUG",  # Important, otherwise performance is severely impacted
+        "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",
     ]
     include_dirs = [
         # Path(this_dir) / "fmha-pipeline",
@@ -164,13 +174,11 @@ if not SKIP_CUDA_BUILD:
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
                 # "cxx": ["-O0", "-std=c++17"],
-                "nvcc": append_nvcc_threads(
-                    nvcc_flags + cc_flag
-                ),
+                "nvcc": append_nvcc_threads(nvcc_flags + cc_flag),
             },
             include_dirs=include_dirs,
             # Without this we get and error about cuTensorMapEncodeTiled not defined
-            libraries=["cuda"]
+            libraries=["cuda"],
         )
     )
     # ext_modules.append(
@@ -209,7 +217,9 @@ def get_wheel_url():
     torch_version_raw = parse(torch.__version__)
     # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.2
     # to save CI time. Minor versions should be compatible.
-    torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
+    torch_cuda_version = (
+        parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
+    )
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
     package_version = get_package_version()
@@ -220,7 +230,9 @@ def get_wheel_url():
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
     wheel_filename = f"{PACKAGE_NAME}-{package_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
-    wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{package_version}", wheel_name=wheel_filename)
+    wheel_url = BASE_WHEEL_URL.format(
+        tag_name=f"v{package_version}", wheel_name=wheel_filename
+    )
     return wheel_url, wheel_filename
 
 
@@ -258,6 +270,7 @@ class CachedWheelsCommand(_bdist_wheel):
             # If the wheel could not be downloaded, build from source
             super().run()
 
+
 setup(
     name=PACKAGE_NAME,
     version=get_package_version(),
@@ -282,11 +295,13 @@ setup(
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": BuildExtension}
-    if ext_modules
-    else {
-        "bdist_wheel": CachedWheelsCommand,
-    },
+    cmdclass=(
+        {"bdist_wheel": CachedWheelsCommand, "build_ext": BuildExtension}
+        if ext_modules
+        else {
+            "bdist_wheel": CachedWheelsCommand,
+        }
+    ),
     python_requires=">=3.8",
     install_requires=[
         "torch",

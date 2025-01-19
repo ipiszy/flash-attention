@@ -75,7 +75,6 @@ def _flash_attn_varlen_forward(
 ):
     maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    breakpoint()
     out, q, k, v, out_padded, softmax_lse = flashattn_hopper_cuda.varlen_fwd(
         q,
         k,
@@ -89,7 +88,6 @@ def _flash_attn_varlen_forward(
         softmax_scale,
         causal,
     )
-    breakpoint()
     # if out.isnan().any() or softmax_lse.isnan().any():
     #     breakpoint()
     return out, q, k, v, out_padded, softmax_lse

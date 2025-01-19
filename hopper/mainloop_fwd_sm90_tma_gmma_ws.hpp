@@ -136,10 +136,12 @@ struct CollectiveMainloopFwd {
       size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
   static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(
       size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
+  static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(
+      size(take<0, 2>(SmemLayoutV{})) * cutlass::sizeof_bits_v<Element> / 8);
 
   // static constexpr bool UseSchedulerBarrier = kHeadDim <= 128;
   static constexpr bool UseSchedulerBarrier =
-      cutlass::sizeof_bits_v<Element> == 8 ? kHeadDim >= 128 : kHeadDim <= 128;
+      cutlass::sizeof_bits_v<Element> == 8 ? kHeadDim >= 128 : kHeadDim <= 192;
 
   // Host side kernel arguments
   struct Arguments {
@@ -166,6 +168,9 @@ struct CollectiveMainloopFwd {
 
   static Params to_underlying_arguments(Arguments const &args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.layout_Q);
+    print("mQ: ");
+    print(mQ);
+    print("\n");
     TMA_Q tma_load_Q =
         make_tma_copy(GmemTiledCopyQ{}, mQ, SmemLayoutQ{},
                       select<0, 2>(TileShape_MNK{}), _1{}); // no mcast for Q
@@ -310,6 +315,38 @@ struct CollectiveMainloopFwd {
 
     if (lane_predicate) {
       shared_storage.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
+
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG("before barrier_Q copy:: m_block: %d, bidh: %d, "
+      //            "bidb: %d, tma_transaction_bytes: %d\n",
+      //            m_block, bidh, blockIdx.z, TmaTransactionBytesQ);
+      //   print("tma_load_Q: ");
+      //   print(mainloop_params.tma_load_Q);
+      //   print("\n");
+      //   print("mQ: ");
+      //   print(mQ);
+      //   print("\n");
+      //   print("gQ: ");
+      //   print(gQ);
+      //   print("\n");
+      //   print("gQ_x: ");
+      //   print(gQ_x);
+      //   print("\n");
+      //   print("tQgQ: ");
+      //   print(tQgQ);
+      //   print("\n");
+      //   print("sQ: ");
+      //   print(sQ);
+      //   print("\n");
+      //   print("sQ_x: ");
+      //   print(sQ_x);
+      //   print("\n");
+      //   print("tQsQ: ");
+      //   print(tQsQ);
+      //   print("\n");
+      //   // print_tensor(gQ);
+      //   // print_tensor(tQgQ);
+      // }
       copy(mainloop_params.tma_load_Q.with(
                reinterpret_cast<
                    cutlass::arch::ClusterTransactionBarrier::ValueType &>(
@@ -318,22 +355,46 @@ struct CollectiveMainloopFwd {
            tQgQ, tQsQ);
     }
 
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    //   CUTE_LOG("before barrier_O wait:: m_block: %d, bidh: %d, "
+    //            "bidb: %d\n",
+    //            m_block, bidh, blockIdx.z);
+    // }
+
     // Wait for warp 1 to signal that smem_v are ready and V can be copied from
     // gmem Need ClusterBarrier, not just NamedBarrier. Otherwise we might have
     // CTA 0 finishing the TMA store on O first, call TMA multicast load on V,
     // before CTA 1 can finishing TMA store on O.
     shared_storage.barrier_O.wait((work_idx + 1) % 2);
 
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    //   CUTE_LOG("after barrier_O wait:: m_block: %d, bidh: %d, "
+    //            "bidb: %d\n",
+    //            m_block, bidh, blockIdx.z);
+    // }
+
     if (lane_predicate) {
 // CUTLASS_PRAGMA_NO_UNROLL
 #pragma unroll 2
       for (; n_block > 0; --n_block) {
+        // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0)
+        // {
+        //   CUTE_LOG("inside n_block:: m_block: %d, bidh: %d, "
+        //            "bidb: %d, n_block: %d\n",
+        //            m_block, bidh, blockIdx.z, n_block);
+        // }
         pipeline_k.producer_acquire(smem_pipe_write_k);
         copy(mainloop_params.tma_load_K.with(
                  *pipeline_k.producer_get_barrier(smem_pipe_write_k),
                  mcast_mask_kv),
              tKgK(_, n_block - 1), tKsK(_, smem_pipe_write_k.index()));
         ++smem_pipe_write_k;
+        // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0)
+        // {
+        //   CUTE_LOG("inside n_block: %d, before copy V, smem_pipe_write_v:
+        //   %d",
+        //            n_block, smem_pipe_write_v.index());
+        // }
         pipeline_v.producer_acquire(smem_pipe_write_v);
         copy(mainloop_params.tma_load_V.with(
                  *pipeline_v.producer_get_barrier(smem_pipe_write_v),
@@ -344,11 +405,39 @@ struct CollectiveMainloopFwd {
     }
     scheduler.prefetch_next_work(scheduler_params, work_tile_info);
     if (lane_predicate) {
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG("outside mainloop, before producer_acquire:: m_block: %d, "
+      //            "bidh: %d, "
+      //            "bidb: %d, smem_pipe_write_v: %d\n",
+      //            m_block, bidh, blockIdx.z, smem_pipe_write_v.index());
+      // }
       pipeline_v.producer_acquire(smem_pipe_write_v);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG(
+      //       "outside mainloop, after producer_acquire:: m_block: %d, bidh:
+      //       %d, " "bidb: %d, smem_pipe_write_v: %d,
+      //       expected_transaction_bytes: %d\n", m_block, bidh, blockIdx.z,
+      //       smem_pipe_write_v.index(), pipeline_v.params_.transaction_bytes);
+      //   // print("tma_load_V: ");
+      //   // print(mainloop_params.tma_load_V);
+      //   // print("\n");
+      //   // print("tVgV: ");
+      //   // print(tVgV(_, n_block));
+      //   // print("\n");
+      //   // print("tVsV: ");
+      //   // print(tVsV(_, smem_pipe_write_v.index()));
+      //   // print("\n");
+      //   // printf("shared_storage size: %d\n", int(sizeof(shared_storage)));
+      // }
       copy(mainloop_params.tma_load_V.with(
                *pipeline_v.producer_get_barrier(smem_pipe_write_v),
                mcast_mask_kv),
            tVgV(_, n_block), tVsV(_, smem_pipe_write_v.index()));
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG("outside mainloop, after copy V:: m_block: %d, bidh: %d, "
+      //            "bidb: %d, smem_pipe_write_v: %d\n",
+      //            m_block, bidh, blockIdx.z, smem_pipe_write_v.index());
+      // }
       ++smem_pipe_write_v;
     }
     scheduler.broadcast_next_work(work_tile_info);
@@ -635,6 +724,10 @@ struct CollectiveMainloopFwd {
                                 MainloopPipeline pipeline_v,
                                 PipelineState &smem_pipe_write_k,
                                 PipelineState &smem_pipe_write_v) {
+    // auto m_block = blockIdx.x;
+    // auto bidh = blockIdx.y;
+    // auto bidb = blockIdx.z;
+
     int lane_predicate = cute::elect_one_sync();
     int warp_idx_in_warpgroup =
         __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
@@ -646,7 +739,15 @@ struct CollectiveMainloopFwd {
        * was still inverted from make_producer_start_state
        */
       pipeline_k.producer_tail(smem_pipe_write_k);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG("before producer_tail, smem_pipe_write_v: %d",
+      //            smem_pipe_write_v.index());
+      // }
       pipeline_v.producer_tail(smem_pipe_write_v);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+      //   CUTE_LOG("after producer_tail, smem_pipe_write_v: %d",
+      //            smem_pipe_write_v.index());
+      // }
     }
   }
 
@@ -740,6 +841,8 @@ struct CollectiveMainloopFwd {
     static_assert(is_rmem<FrgTensorO>::value,
                   "O tensor must be rmem resident.");
 
+    auto bidh = blockIdx.y;
+    // auto bidb = blockIdx.z;
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
@@ -782,9 +885,49 @@ struct CollectiveMainloopFwd {
         partition_fragment_C(tiled_mma0, select<0, 1>(TileShape_MNK{}));
     consumer_wait(pipeline_k, smem_pipe_read_k);
     warp_scheduler_barrier_sync();
+
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   CUTE_LOG("before mainloop, before gemm0:: m_block: %d, bidh: %d, "
+    //            "bidb: %d\n",
+    //            m_block, bidh, blockIdx.z);
+    //   print("SmemLayoutAtomQ: ");
+    //   print(typename Ktraits::SmemLayoutAtomQ{});
+    //   print("\n");
+    //   print("TileShapeMNK_QK: ");
+    //   print(typename Ktraits::TileShape_MNK_QK{});
+    //   print("\n");
+    //   print("smemLayoutQ: ");
+    //   print(SmemLayoutQ{});
+    //   print("\n");
+    //   print("smemLayoutK: ");
+    //   print(SmemLayoutK{});
+    //   print("\n");
+    //   print("smemLayoutV: ");
+    //   print(SmemLayoutV{});
+    //   print("\n");
+    //   printf("==== sQ ====\n");
+    //   print(sQ);
+    //   print("\n");
+    //   print_tensor(sQ);
+    //   printf("==== sK ====\n");
+    //   print(sK);
+    //   print("\n");
+    //   print_tensor(sK);
+    //   // printf("==== tSrQ ====\n");
+    //   // print_tensor(tSrQ);
+    //   // printf("==== tSrK ====\n");
+    //   // print_tensor(tSrK(_, _, _, smem_pipe_read_k.index()));
+    //   print("tiled_mma0: ");
+    //   print(tiled_mma0);
+    //   print("\n");
+    // }
+
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(
         tiled_mma0, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     warp_scheduler_barrier_arrive();
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   printf("==== first warp scheduler ====\n");
+    // }
 
     if (work_idx != 0) {
       int lane_predicate = cute::elect_one_sync();
@@ -838,6 +981,9 @@ struct CollectiveMainloopFwd {
 
     constexpr int n_masking_steps =
         !Is_causal ? 1 : cute::ceil_div(kBlockM, kBlockN) + 1;
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   printf("==== n_masking_steps: %d ====\n", n_masking_steps);
+    // }
 // Only go through these if Is_causal, since n_masking_steps = 1 when !Is_causal
 #pragma unroll
     for (int masking_step = 0;
@@ -845,14 +991,55 @@ struct CollectiveMainloopFwd {
          ++masking_step, --n_block) {
       Tensor tSrS =
           partition_fragment_C(tiled_mma0, select<0, 1>(TileShape_MNK{}));
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   printf("==== masking(%d), before consumer_wait ====\n",
+      //   masking_step);
+      // }
       consumer_wait(pipeline_k, smem_pipe_read_k);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   printf("==== masking(%d), before warp sync ====\n", masking_step);
+      // }
       warp_scheduler_barrier_sync();
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside masking(%d), before gemm0:: m_block: %d, bidh: %d, "
+      //            "bidb: %d\n",
+      //            masking_step, m_block, bidh, blockIdx.z);
+      //   printf("==== tSrQ ====\n");
+      //   print_tensor(tSrQ);
+      //   printf("==== tSrK ====\n");
+      //   print_tensor(tSrK(_, _, _, smem_pipe_read_k.index()));
+      // }
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(
           tiled_mma0, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
       if (masking_step > 0) {
         softmax.rescale_o(tOrO, scores_scale);
       }
+
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside masking (%d), before consumer_wait:: m_block: %d, "
+      //            "bidh: %d, "
+      //            "bidb: %d, smem_pipe_read_v: %d\n",
+      //            masking_step, m_block, bidh, blockIdx.z,
+      //            smem_pipe_read_v.index());
+      // }
       consumer_wait(pipeline_v, smem_pipe_read_v);
+
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside masking (%d), before gemm1:: m_block: %d, bidh: %d,
+      //   "
+      //            "bidb: %d, smem_pipe_read_v: %d\n",
+      //            masking_step, m_block, bidh, blockIdx.z,
+      //            smem_pipe_read_v.index());
+      //   printf("==== tOrP ====\n");
+      //   print_tensor(tOrP);
+      //   printf("==== tOrV ====\n");
+      //   print_tensor(tOrV(_, _, _, smem_pipe_read_v.index()));
+      // }
       flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(
           tiled_mma1, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
       warp_scheduler_barrier_arrive();
@@ -873,6 +1060,16 @@ struct CollectiveMainloopFwd {
       softmax.template online_softmax</*Is_first=*/false, /*Check_inf=*/true>(
           tSrS, mainloop_params.softmax_scale_log2);
       warpgroup_wait<0>();
+
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside masking (%d), before consumer_release:: m_block: %d,
+      //   "
+      //            "bidh: %d, "
+      //            "bidb: %d, smem_pipe_read_v: %d\n",
+      //            masking_step, m_block, bidh, blockIdx.z,
+      //            smem_pipe_read_v.index());
+      // }
       pipeline_v.consumer_release(smem_pipe_read_v); // release V
       ++smem_pipe_read_k;
       ++smem_pipe_read_v;
@@ -887,12 +1084,50 @@ struct CollectiveMainloopFwd {
     for (; n_block > 0; --n_block) {
       Tensor tSrS =
           partition_fragment_C(tiled_mma0, select<0, 1>(TileShape_MNK{}));
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   printf("==== n_block: %d, before consumer wait ====\n", n_block);
+      // }
       consumer_wait(pipeline_k, smem_pipe_read_k);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   printf("==== n_block: %d, before warp sync ====\n", n_block);
+      // }
       warp_scheduler_barrier_sync();
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside mainloop(%d), before gemm0:: m_block: %d, bidh: %d,
+      //   "
+      //            "bidb: %d\n",
+      //            n_block, m_block, bidh, blockIdx.z);
+      //   printf("==== tSrQ ====\n");
+      //   print_tensor(tSrQ);
+      //   printf("==== tSrK ====\n");
+      //   print_tensor(tSrK(_, _, _, smem_pipe_read_k.index()));
+      // }
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(
           tiled_mma0, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
       softmax.rescale_o(tOrO, scores_scale);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside mainloop(%d), before consumer_wait:: m_block: %d, "
+      //            "bidh: %d, "
+      //            "bidb: %d, smem_pipe_read_v: %d\n",
+      //            n_block, m_block, bidh, blockIdx.z,
+      //            smem_pipe_read_v.index());
+      // }
       consumer_wait(pipeline_v, smem_pipe_read_v);
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside mainloop(%d), before gemm1:: m_block: %d, bidh: %d,
+      //   "
+      //            "bidb: %d\n",
+      //            n_block, m_block, bidh, blockIdx.z);
+      //   printf("==== tOrP ====\n");
+      //   print_tensor(tOrP);
+      //   printf("==== tOrV ====\n");
+      //   print_tensor(tOrV(_, _, _, smem_pipe_read_v.index()));
+      // }
       flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(
           tiled_mma1, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
       warp_scheduler_barrier_arrive();
@@ -905,6 +1140,15 @@ struct CollectiveMainloopFwd {
       softmax.template online_softmax</*Is_first=*/false>(
           tSrS, mainloop_params.softmax_scale_log2);
       warpgroup_wait<0>();
+      // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128)
+      // {
+      //   CUTE_LOG("inside mainloop(%d), before consumer_release:: m_block: %d,
+      //   "
+      //            "bidh: %d, "
+      //            "bidb: %d, smem_pipe_read_v: %d\n",
+      //            n_block, m_block, bidh, blockIdx.z,
+      //            smem_pipe_read_v.index());
+      // }
       pipeline_v.consumer_release(smem_pipe_read_v); // release V
       ++smem_pipe_read_k;
       ++smem_pipe_read_v;
@@ -920,13 +1164,36 @@ struct CollectiveMainloopFwd {
         NumMmaThreads + cutlass::NumThreadsPerWarp,
         static_cast<int>(FwdNamedBarriers::QueryEmpty) /*id*/);
     softmax.rescale_o(tOrO, scores_scale);
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   CUTE_LOG(
+    //       "outside of mainloop before consumer wait:: m_block: %d, bidh: %d,
+    //       " "bidb: %d, smem_pipe_read_v: %d\n", m_block, bidh, blockIdx.z,
+    //       smem_pipe_read_v.index());
+    // }
     consumer_wait(pipeline_v, smem_pipe_read_v);
+
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   CUTE_LOG("outside of mainloop before gemm1:: m_block: %d, bidh: %d, "
+    //            "bidb: %d\n",
+    //            m_block, bidh, blockIdx.z);
+    //   printf("==== tOrP ====\n");
+    //   print_tensor(tOrP);
+    //   printf("==== tOrV ====\n");
+    //   print_tensor(tOrV(_, _, _, smem_pipe_read_v.index()));
+    // }
     flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(
         tiled_mma1, tOrP, tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
     cute::copy(softmax.template finalize</*Check_inf=*/Is_causal>(
                    tSrS, mainloop_params.softmax_scale_log2),
                scores_scale);
     warpgroup_wait<0>();
+    // if (bidh == 0 && m_block == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
+    //   CUTE_LOG("outside mainloop(%d), before consumer_release:: m_block: %d,
+    //   "
+    //            "bidh: %d, "
+    //            "bidb: %d, smem_pipe_read_v: %d\n",
+    //            n_block, m_block, bidh, blockIdx.z, smem_pipe_read_v.index());
+    // }
     pipeline_v.consumer_release(
         smem_pipe_read_v); // release V, otherwise producers will hang
     ++smem_pipe_read_v;
@@ -1191,7 +1458,7 @@ struct CollectiveMainloopFwd {
         Tensor tSrS =
             partition_fragment_C(tiled_mma0, select<0, 1>(TileShape_MNK{}));
         consumer_wait(pipeline_k, smem_pipe_read);
-        if constexpr (kHeadDim > 128) {
+        if constexpr (kHeadDim == 256) {
           warp_scheduler_barrier_sync();
         }
         flash::gemm</*zero_init=*/true, /*wg_wait=*/0>(

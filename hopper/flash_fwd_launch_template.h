@@ -17,6 +17,7 @@
 #include "static_switch.h"
 #include "tile_scheduler.hpp"
 #include "utils.h"
+#include <cstdio>
 
 template <typename Kernel_traits, bool Is_causal, typename Seqlen_traits>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
@@ -61,6 +62,20 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                params.v_row_stride, params.v_head_stride,
                params.v_batch_stride), // layout_V
            params.scale_softmax_log2});
+
+  printf(
+      "params.seqlen_q = %d, params.d_qk= %d, params.h = %d, params.b = %d\n",
+      params.seqlen_q, params.d_qk, params.h, params.b);
+  printf("params.q_row_stride = %d, params.q_head_stride = %d, "
+         "params.q_batch_stride = %d\n",
+         params.q_row_stride, params.q_head_stride, params.q_batch_stride);
+
+  printf(
+      "params.seqlen_q = %d, params.d_vo= %d, params.h = %d, params.b = %d\n",
+      params.seqlen_q, params.d_vo, params.h, params.b);
+  printf("params.o_row_stride = %d, params.o_head_stride = %d, "
+         "params.o_batch_stride = %d\n",
+         params.o_row_stride, params.o_head_stride, params.o_batch_stride);
   typename CollectiveEpilogue::Params epilogue_params =
       CollectiveEpilogue::to_underlying_arguments({
           static_cast<OutputType *>(params.o_ptr),
@@ -110,6 +125,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                     cudaDevAttrMultiProcessorCount, device));
   dim3 grid_dims =
       Scheduler::get_grid_dim(scheduler_args, multiprocessor_count);
+  printf("grid_dims = %d, %d, %d\n", grid_dims.x, grid_dims.y, grid_dims.z);
   static constexpr int ctaSize = Kernel_traits::kNWarps * 32;
   dim3 block_dims(ctaSize);
   dim3 cluster_dims(size<0>(ClusterShape{}), size<1>(ClusterShape{}),
