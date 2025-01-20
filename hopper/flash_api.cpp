@@ -70,6 +70,8 @@ void set_params_fprop(Flash_fwd_params &params,
                       const size_t h_k,
                       const size_t d,
                       const size_t d_rounded,
+                      const size_t d_vo,
+                      const size_t d_vo_rounded,
                       // device pointers
                       const at::Tensor q,
                       const at::Tensor k,
@@ -136,6 +138,8 @@ void set_params_fprop(Flash_fwd_params &params,
     params.seqlen_k_rounded = seqlen_k_rounded;
     params.d = d;
     params.d_rounded = d_rounded;
+    params.d_vo = d_vo;
+    params.d_vo_rounded = d_vo_rounded;
 
     // Set the different scale values.
     params.scale_softmax = softmax_scale;
@@ -184,6 +188,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                       const size_t h_k,
                       const size_t d,
                       const size_t d_rounded,
+                      const size_t d_vo,
+                      const size_t d_vo_rounded,
                       // device pointers
                       const at::Tensor q,
                       const at::Tensor k,
@@ -211,7 +217,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                       int const sm_margin=0) {
 
     set_params_fprop(params,
-                     b, seqlen_q, seqlen_k, seqlen_q_rounded, seqlen_k_rounded, h, h_k, d, d_rounded,
+                     b, seqlen_q, seqlen_k, seqlen_q_rounded, seqlen_k_rounded, h, h_k, d, d_rounded, d_vo, d_vo_rounded,
                      q, k, v, out,
                      cu_seqlens_q_d,
                      cu_seqlens_k_d,
@@ -280,7 +286,13 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                 if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, 128, Split, PagedKV, Has_softcap, PackGQA>(params, stream); }
                                 #endif
                                 #ifndef FLASHATTENTION_DISABLE_HDIM192
-                                if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, 192, Split, PagedKV, Has_softcap, PackGQA>(params, stream); }
+                                if (params.d <= 192) { 
+                                    if (params.d_vo == 128) {
+                                        return run_mha_fwd_<Arch, cutlass::bfloat16_t, 192, Split, PagedKV, Has_softcap, PackGQA, 128>(params, stream); 
+                                    } else {
+                                        return run_mha_fwd_<Arch, cutlass::bfloat16_t, 192, Split, PagedKV, Has_softcap, PackGQA>(params, stream); 
+                                    }
+                                }
                                 #endif
                                 #ifndef FLASHATTENTION_DISABLE_HDIM256
                                 if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, 256, Split, PagedKV, Has_softcap, PackGQA>(params, stream); }
@@ -551,6 +563,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     int total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int num_heads = q.size(-2);
     int const head_size = q.size(-1);
+    int const head_size_vo = v.size(-1);
     int const max_num_pages_per_seq = !paged_KV ? 0 : page_table.size(1);
     int const num_pages = !paged_KV ? 0 : k.size(0);
     int const page_size = !paged_KV ? 1 : k.size(1);
@@ -583,15 +596,15 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     if (!paged_KV) {
         if (!is_varlen_k) {
             CHECK_SHAPE(k, batch_size_k, seqlen_k, num_heads_k, head_size);
-            CHECK_SHAPE(v, batch_size_k, seqlen_k, num_heads_k, head_size);
+            CHECK_SHAPE(v, batch_size_k, seqlen_k, num_heads_k, head_size_vo);
         } else {
             CHECK_SHAPE(k, total_k, num_heads_k, head_size);
-            CHECK_SHAPE(v, total_k, num_heads_k, head_size);
+            CHECK_SHAPE(v, total_k, num_heads_k, head_size_vo);
             CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
         }
     } else {
         CHECK_SHAPE(k, num_pages, page_size, num_heads_k, head_size);
-        CHECK_SHAPE(v, num_pages, page_size, num_heads_k, head_size);
+        CHECK_SHAPE(v, num_pages, page_size, num_heads_k, head_size_vo);
         CHECK_SHAPE(page_table, batch_size_k, max_num_pages_per_seq);
     }
 
@@ -620,16 +633,17 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         CHECK_DEVICE(out);
         TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
         if (!is_varlen_q) {
-            CHECK_SHAPE(out, batch_size, seqlen_q, num_heads, head_size);
+            CHECK_SHAPE(out, batch_size, seqlen_q, num_heads, head_size_vo);
         } else {
-            CHECK_SHAPE(out, total_q, num_heads, head_size);
+            CHECK_SHAPE(out, total_q, num_heads, head_size_vo);
         }
     } else {
-        out = torch::empty_like(q, opts.dtype(out_type));
+        out = torch::empty({total_q, num_heads, head_size_vo}, q.options());
     }
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
     int const head_size_rounded = round_up_headdim(head_size);
+    int const head_size_vo_rounded = round_up_headdim(head_size_vo);
     int const seqlen_q_rounded = round_multiple(seqlen_q, 128);
     int const seqlen_k_rounded = round_multiple(seqlen_k, 128);
 
@@ -651,6 +665,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                      seqlen_q_rounded, seqlen_k_rounded,
                      num_heads, num_heads_k,
                      head_size, head_size_rounded,
+                     head_size_vo, head_size_vo_rounded,
                      q, k, v, out,
                      !is_varlen_q ? nullptr : cu_seqlens_q.data_ptr(),
                      !is_varlen_k ? nullptr : cu_seqlens_k.data_ptr(),
@@ -772,12 +787,12 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     if (params.num_splits > 1) {
         TORCH_CHECK(params.num_splits <= 256, "num_splits > 256 not supported");
         if (!is_varlen_q) {
-            out_accum = torch::empty({params.num_splits, batch_size, num_heads, seqlen_q, head_size}, opts.dtype(outaccum_type));
+            out_accum = torch::empty({params.num_splits, batch_size, num_heads, seqlen_q, head_size_vo}, opts.dtype(outaccum_type));
             softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
             params.oaccum_batch_stride = out_accum.stride(1);
             params.lseaccum_batch_stride = softmax_lse_accum.stride(1);
         } else {
-            out_accum = torch::empty({params.num_splits, num_heads, total_q, head_size}, opts.dtype(outaccum_type));
+            out_accum = torch::empty({params.num_splits, num_heads, total_q, head_size_vo}, opts.dtype(outaccum_type));
             softmax_lse_accum = torch::empty({params.num_splits, num_heads, total_q}, opts.dtype(at::kFloat));
         }
         params.is_fp32 = false;
@@ -921,7 +936,13 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
                 if (params.d <= 128) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, 128, Has_softcap>(params, stream); }
                 #endif
                 #ifndef FLASHATTENTION_DISABLE_HDIM192
-                if (params.d <= 192) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, 192, Has_softcap>(params, stream); }
+                if (params.d <= 192) { 
+                    if (params.d_vo == 128) {
+                        return run_mha_bwd_<Arch, cutlass::bfloat16_t, 192, Has_softcap, 128>(params, stream); 
+                    } else {
+                        return run_mha_bwd_<Arch, cutlass::bfloat16_t, 192, Has_softcap>(params, stream); 
+                    }
+                }
                 #endif
                 #ifndef FLASHATTENTION_DISABLE_HDIM256
                 if (params.d <= 256) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, 256, Has_softcap>(params, stream); }
@@ -1017,10 +1038,12 @@ std::vector<at::Tensor> mha_bwd(
     int const total_q = !is_varlen_q ? batch_size * sizes[1] : sizes[0];
     int const num_heads = q.size(-2);
     int const head_size = q.size(-1);
+    int const head_size_vo = v.size(-1);
     int const seqlen_k = !is_varlen_k ? k.size(1) : max_seqlen_k_.value();
     int const total_k = !is_varlen_k ? batch_size * k.size(1) : k.size(0);
     int const num_heads_k = k.size(-2);
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
+    TORCH_CHECK(head_size_vo % 8 == 0, "head_size should be a multiple of 8");
     int const max_headdim = get_max_headdim();
     TORCH_CHECK(head_size <= max_headdim, "FlashAttention forward only supports head dimension at most " + std::to_string(max_headdim));
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
@@ -1035,6 +1058,7 @@ std::vector<at::Tensor> mha_bwd(
 
     int const arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
     int const head_size_rounded = round_up_headdim(head_size);
+    int const head_size_vo_rounded = round_up_headdim(head_size_vo);
     // Very important that these match the kernel configs
     bool const is_local = (window_size_left >= 0 || window_size_right >= 0) && !is_causal;
     int const kBlockM_sm90 = head_size_rounded <= 64 ? (is_causal && softcap > 0.0 ? 96 : 128)
@@ -1063,20 +1087,20 @@ std::vector<at::Tensor> mha_bwd(
 
     if (!is_varlen_q) {
         CHECK_SHAPE(q, batch_size, seqlen_q, num_heads, head_size);
-        CHECK_SHAPE(out, batch_size, seqlen_q, num_heads, head_size);
-        CHECK_SHAPE(dout, batch_size, seqlen_q, num_heads, head_size);
+        CHECK_SHAPE(out, batch_size, seqlen_q, num_heads, head_size_vo);
+        CHECK_SHAPE(dout, batch_size, seqlen_q, num_heads, head_size_vo);
     } else {
         CHECK_SHAPE(q, total_q, num_heads, head_size);
-        CHECK_SHAPE(out, total_q, num_heads, head_size);
-        CHECK_SHAPE(dout, total_q, num_heads, head_size);
+        CHECK_SHAPE(out, total_q, num_heads, head_size_vo);
+        CHECK_SHAPE(dout, total_q, num_heads, head_size_vo);
         CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
     }
     if (!is_varlen_k) {
         CHECK_SHAPE(k, batch_size, seqlen_k, num_heads_k, head_size);
-        CHECK_SHAPE(v, batch_size, seqlen_k, num_heads_k, head_size);
+        CHECK_SHAPE(v, batch_size, seqlen_k, num_heads_k, head_size_vo);
     } else {
         CHECK_SHAPE(k, total_k, num_heads_k, head_size);
-        CHECK_SHAPE(v, total_k, num_heads_k, head_size);
+        CHECK_SHAPE(v, total_k, num_heads_k, head_size_vo);
         CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
     }
 
@@ -1126,9 +1150,9 @@ std::vector<at::Tensor> mha_bwd(
         CHECK_DEVICE(dv);
         TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
         if (!is_varlen_k) {
-            CHECK_SHAPE(dv, batch_size, seqlen_k, num_heads_k, head_size);
+            CHECK_SHAPE(dv, batch_size, seqlen_k, num_heads_k, head_size_vo);
         } else {
-            CHECK_SHAPE(dv, total_k, num_heads_k, head_size);
+            CHECK_SHAPE(dv, total_k, num_heads_k, head_size_vo);
         }
     } else {
         dv = torch::empty_like(v);
@@ -1172,6 +1196,7 @@ std::vector<at::Tensor> mha_bwd(
                      seqlen_q_rounded, seqlen_k_rounded,
                      num_heads, num_heads_k,
                      head_size, head_size_rounded,
+                     head_size_vo, head_size_vo_rounded,
                      q, k, v, out,
                      dout, dq, dk, dv,
                      !is_varlen_q ? nullptr : cu_seqlens_q.data_ptr(),

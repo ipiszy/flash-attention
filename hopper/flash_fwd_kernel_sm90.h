@@ -49,6 +49,7 @@ public:
 
     // Mainloop derived types
     using TileShape_MNK = typename CollectiveMainloop::TileShape_MNK;
+    using TileShape_MNK_VO = typename CollectiveMainloop::TileShape_MNK_VO;
     using TiledMma0 = typename CollectiveMainloop::TiledMma0;
     using TiledMma1 = typename CollectiveMainloop::TiledMma1;
     using ArchTag = typename CollectiveMainloop::ArchTag;
@@ -210,6 +211,7 @@ public:
 
         // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
         PipelineParamsK pipeline_params_k;
+        PipelineParamsV pipeline_params_v;
         pipeline_params_k.role = warp_group_idx == 0
             ? MainloopPipelineK::ThreadCategory::Producer
             : MainloopPipelineK::ThreadCategory::Consumer;
@@ -217,9 +219,12 @@ public:
             pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
             pipeline_params_k.is_leader = warp_group_thread_idx == 0;
             pipeline_params_k.num_consumers = NumMmaThreads;
+            pipeline_params_v = pipeline_params_k;
+            pipeline_params_v.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
         } else {
             pipeline_params_k.consumer_arv_count = NumMmaThreads;
             pipeline_params_k.producer_arv_count = NumProducerThreads;
+            pipeline_params_v = pipeline_params_k;
         }
 
         MainloopPipelineK pipeline_k = [&] {
@@ -232,11 +237,11 @@ public:
         // MainloopPipelineV pipeline_v(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
         MainloopPipelineV pipeline_v = [&] {
             if constexpr (!Transpose_V) {
-                static_assert(is_same_v<PipelineParamsK, PipelineParamsV>);
+                // static_assert(is_same_v<PipelineParamsK, PipelineParamsV>);
                 if constexpr (Use_TMA_KV) {
-                    return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_k, ClusterShape{});
+                    return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
                 } else {
-                    return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_k);
+                    return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_v);
                 }
             } else {
                 PipelineParamsV pipeline_params_v;
@@ -357,7 +362,7 @@ public:
                  work_tile_info.is_valid(params.scheduler);
                  work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
                 // Attention output (GEMM-II) accumulator.
-                Tensor tOrO = partition_fragment_C(tiled_mma1, select<0, 2>(TileShape_MNK{}));
+                Tensor tOrO = partition_fragment_C(tiled_mma1, select<0, 2>(TileShape_MNK_VO{}));
                 float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
                 // If there's tanh softcap, the scaling will be done before tanh.
                 auto block_coord = work_tile_info.get_block_coord(params.scheduler);

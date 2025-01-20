@@ -18,7 +18,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen, class TileShape_MK_VO_=TileShape_MK_>
 class FlashAttnBwdPreprocess {
 
 public:

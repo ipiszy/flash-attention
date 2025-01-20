@@ -28,7 +28,7 @@ template <int Arch, int kHeadDim, int kBlockM, int kBlockN, typename Element,
           int Stages_dO=2, int Stages_dS_or_QSm80=2,
           bool SdP_swapAB=true, bool dKV_swapAB=false, bool dQ_swapAB=false,
           int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-          bool V_in_regs=false>
+          bool V_in_regs=false, int kHeadDim_VO = kHeadDim>
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Is_causal and Is_local cannot be true at the same time.");
     using ElementAccum = float;
@@ -46,7 +46,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     int batch_k = !is_varlen_k ? params.b : 1;
 
     using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, ArchTag, /*Clear_dQaccum=*/true, Varlen>;
+    using TileShape_MK_VO = cute::Shape<Int<kBlockM>, Int<kHeadDim_VO>>;
+    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, ArchTag, /*Clear_dQaccum=*/true, Varlen, TileShape_MK_VO>;
     typename PreprocessKernel::Arguments preprocess_args {
         static_cast<Element const*>(params.o_ptr),
         {seqlen_q, params.d, params.h, batch_q},  // shape_O
@@ -284,13 +285,13 @@ template<int Arch, typename T, int kBlockM, int kBlockN, int kHeadDim, bool Is_c
          int Stages_dO=2, int Stages_dS_or_QSm80=2,
          bool SdP_swapAB=true, bool dKV_swapAB=false, bool dQ_swapAB=false,
          int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-         bool V_in_regs=false>
+         bool V_in_regs=false, int kHeadDim_VO=kHeadDim>
 void run_mha_bwd_dispatch(Flash_bwd_params &params, cudaStream_t stream) {
     VARLEN_SWITCH(params.cu_seqlens_q != nullptr || params.cu_seqlens_k != nullptr, Varlen, [&] {
         BOOL_SWITCH(params.h != params.h_k, GQA, [&] {
 //             BOOL_SWITCH(params.deterministic, Deterministic, [&] {
             // run_flash_bwd<kHeadDim, kBlockM, kBlockN, T, Is_causal, Is_local, Has_softcap, Varlen, false, GQA, Stages_dO, Stages_dS_or_QSm80, SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ>(params, stream);
-            run_flash_bwd<Arch, kHeadDim, kBlockM, kBlockN, T, Is_causal, Is_local, Has_softcap, Varlen /*Varlen*/, false /*Deterministic*/, GQA, Stages_dO, Stages_dS_or_QSm80, SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>(params, stream);
+            run_flash_bwd<Arch, kHeadDim, kBlockM, kBlockN, T, Is_causal, Is_local, Has_softcap, Varlen /*Varlen*/, false /*Deterministic*/, GQA, Stages_dO, Stages_dS_or_QSm80, SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs, kHeadDim_VO>(params, stream);
 //             });
         });
     });
@@ -349,15 +350,15 @@ void run_mha_bwd_hdim128(Flash_bwd_params &params, cudaStream_t stream) {
     });
 }
 
-template<int Arch, typename T, bool Has_softcap>
+template<int Arch, typename T, bool Has_softcap, int kHeadDim_VO=192>
 void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     CAUSAL_LOCAL_SWITCH(params.is_causal, params.is_local, Is_causal, Is_local, [&] {
         if constexpr (Arch >= 90) {
-            run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 3, 1, 1, 1, false>(params, stream);
+            run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 3, 1, 1, 1, false, kHeadDim_VO>(params, stream);
         } else if constexpr (Arch == 86 || Arch == 89) {
-            run_mha_bwd_dispatch<Arch, T, 64, 64, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, false, false, 2, 2, 2, 2, true>(params, stream);
+            run_mha_bwd_dispatch<Arch, T, 64, 64, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, false, false, 2, 2, 2, 2, true, kHeadDim_VO>(params, stream);
         } else {
-            run_mha_bwd_dispatch<Arch, T, 64, 80, 192, Is_causal, Is_local, Has_softcap, 1, 2, false, true, false, 2, 4, 2, 2, false>(params, stream);
+            run_mha_bwd_dispatch<Arch, T, 64, 80, 192, Is_causal, Is_local, Has_softcap, 1, 2, false, true, false, 2, 4, 2, 2, false, kHeadDim_VO>(params, stream);
         }
     });
 }

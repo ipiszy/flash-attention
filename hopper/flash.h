@@ -62,7 +62,7 @@ struct Flash_fwd_params : public Qkv_params {
     index_t v_descale_head_stride;
 
     // The dimensions.
-    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
+    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim, d_vo, d_vo_rounded;
     int total_q, total_k, total_knew;
     int b_k;  // When having KV cache and with cache_batch_idx, K & V might have larger batch size than Q
 
@@ -197,9 +197,9 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Arch, typename T, int Headdim, bool Split, bool PagedKV, bool Has_softcap, bool PackGQA>
+template <int Arch, typename T, int Headdim, bool Split, bool PagedKV, bool Has_softcap, bool PackGQA, int Headdim_VO=Headdim>
 void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
-template <int Arch, typename T, int Headdim, bool Has_softcap>
+template <int Arch, typename T, int Headdim, bool Has_softcap, int Headdim_VO=Headdim>
 void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
 template <typename T, typename Tpartial, int Headdim>
 void run_mha_fwd_combine_(Flash_fwd_params &params, cudaStream_t stream);

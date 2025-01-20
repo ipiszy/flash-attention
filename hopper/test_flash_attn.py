@@ -1,6 +1,7 @@
 import os
 import math
 import itertools
+from typing import Tuple
 
 import pytest
 import torch
@@ -41,6 +42,7 @@ COMPILED_HDIMS = (
     + ([128] if not DISABLE_HDIM128 else [])
     + ([192] if not DISABLE_HDIM192 else [])
     + ([256] if not DISABLE_HDIM256 else [])
+    + ([(192, 128)] if not DISABLE_HDIM192 else [])
 )
 
 
@@ -309,6 +311,10 @@ def test_flash_attn_output(
 def test_flash_attn_varlen_output(
     seqlen_q, seqlen_k, d, add_unused_qkv, causal, local, softcap, deterministic, mha_type, dtype
 ):
+    if isinstance(d, Tuple):
+        d, d_vo = d
+    else:
+        d_vo = d
     device = "cuda"
     # set seed
     torch.random.manual_seed(seqlen_q + seqlen_k + d + int(causal) * 2 + int(local))
@@ -326,7 +332,7 @@ def test_flash_attn_varlen_output(
         q_ref = (q_ref * softcap / 4).detach().requires_grad_()
     q_ref = q_ref.to(dtype).to(dtype_ref).requires_grad_()
     k_ref = torch.randn(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
-    v_ref = torch.randn(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
+    v_ref = torch.randn(batch_size, seqlen_k, nheads_kv, d_vo, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
     # Put window_size after QKV randn so that window_size changes from test to test
     window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
     if dtype == torch.float8_e4m3fn:
