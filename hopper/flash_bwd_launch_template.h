@@ -28,7 +28,7 @@ template <int Arch, int kHeadDim, int kBlockM, int kBlockN, typename Element,
           int Stages_dO=2, int Stages_dS_or_QSm80=2,
           bool SdP_swapAB=true, bool dKV_swapAB=false, bool dQ_swapAB=false,
           int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-          bool V_in_regs=false>
+          bool V_in_regs=false, int kHeadDim_VO = kHeadDim>
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Is_causal and Is_local cannot be true at the same time.");
     using ElementAccum = float;
@@ -46,7 +46,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     int batch_k = !is_varlen_k ? params.b : 1;
 
     using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, ArchTag, /*Clear_dQaccum=*/true, Varlen>;
+    using TileShape_MK_VO = cute::Shape<Int<kBlockM>, Int<kHeadDim_VO>>;
+    using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, ArchTag, /*Clear_dQaccum=*/true, Varlen, TileShape_MK_VO>;
     typename PreprocessKernel::Arguments preprocess_args {
         static_cast<Element const*>(params.o_ptr),
         {seqlen_q, params.d, params.h, batch_q},  // shape_O
