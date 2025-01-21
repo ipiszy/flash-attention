@@ -18,13 +18,14 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen, class TileShape_MK_VO_=TileShape_MK_>
 class FlashAttnBwdPreprocess {
 
 public:
 
     // Type Aliases
     using TileShape_MK = TileShape_MK_;
+    using TileShape_MK_VO = TileShape_MK_VO_;
     using ArchTag = ArchTag_;
 
     static_assert(std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
@@ -156,9 +157,9 @@ public:
         if (is_varlen && m_block * kBlockM >= seqlen_o) { return; }
 
         Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mO), TileShape_MK_VO{}, make_coord(m_block, _0{}));  // (M, K)
         Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mdO), TileShape_MK_VO{}, make_coord(m_block, _0{}));  // (M, K)
 
         auto shape_LSE = select<0, 2, 3>(params.shape_O);
         Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), shape_LSE, params.stride_LSE)(_, bidh, !is_varlen ? bidb : 0);
@@ -172,7 +173,7 @@ public:
         Tensor tOgO = gmem_thr_copy_O.partition_S(gO);
         Tensor tOgdO = gmem_thr_copy_O.partition_S(gdO);
         // Construct identity layout for gO
-        Tensor cO = cute::make_identity_tensor(TileShape_MK{});  // (BLK_M,BLK_K) -> (blk_m,blk_k)
+        Tensor cO = cute::make_identity_tensor(TileShape_MK_VO{});  // (BLK_M,BLK_K) -> (blk_m,blk_k)
         // Repeat the partitioning with identity layouts
         Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
         Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));

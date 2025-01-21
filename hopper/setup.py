@@ -450,11 +450,12 @@ if not SKIP_CUDA_BUILD:
     DTYPE_BWD = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
     HEAD_DIMENSIONS_BWD = (
         []
-        + ([64] if not DISABLE_HDIM64 else [])
-        + ([96] if not DISABLE_HDIM96 else [])
-        + ([128] if not DISABLE_HDIM128 else [])
-        + ([192] if not DISABLE_HDIM192 else [])
-        + ([256] if not DISABLE_HDIM256 else [])
+        + (["64"] if not DISABLE_HDIM64 else [])
+        + (["96"] if not DISABLE_HDIM96 else [])
+        + (["128"] if not DISABLE_HDIM128 else [])
+        + (["192"] if not DISABLE_HDIM192 else [])
+        + (["256"] if not DISABLE_HDIM256 else [])
+        + (["192_128"] if not DISABLE_HDIM256 else [])
     )
     HEAD_DIMENSIONS_FWD = ["all"]
     HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD

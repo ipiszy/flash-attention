@@ -27,7 +27,7 @@ namespace flash {
 
 using namespace cute;
 
-template <int Stages, class ClusterShape_, class TileShape_MNK_, class Element_, class ElementAccum_, class ArchTag_,
+template <int Stages, class ClusterShape_, class TileShape_MNK_, class TileShape_MNK_VO_, class Element_, class ElementAccum_, class ArchTag_,
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool PagedKV_, bool AppendKV_,
         bool Mma1_is_RS, bool IntraWGOverlap, bool PackGQA_, bool Split_, bool V_colmajor_>
 struct CollectiveMainloopFwdSm90 {
@@ -35,6 +35,7 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr int kStages = Stages;
     using ClusterShape = ClusterShape_;
     using TileShape_MNK = TileShape_MNK_;
+    using TileShape_MNK_VO = TileShape_MNK_VO_;
     using Element = Element_;
     using ElementAccum = ElementAccum_;
     using ArchTag = ArchTag_;
@@ -63,6 +64,7 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
     static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+    static constexpr int kHeadDim_VO = get<2>(TileShape_MNK_VO{});
 
     // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.
     // Leaving this option here for reference.
@@ -84,9 +86,9 @@ struct CollectiveMainloopFwdSm90 {
         std::conditional_t<
             !Mma1_is_RS,
             decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum,
-                     decltype(select<0, 2, 1>(TileShape_MNK{})), GMMA::Major::K, MmaMajorV>()),
+                     decltype(select<0, 2, 1>(TileShape_MNK_VO{})), GMMA::Major::K, MmaMajorV>()),
             decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum,
-                     decltype(select<0, 2, 1>(TileShape_MNK{})), GMMA::Major::K, MmaMajorV>())
+                     decltype(select<0, 2, 1>(TileShape_MNK_VO{})), GMMA::Major::K, MmaMajorV>())
         >{},
         AtomLayoutMNK{}));
 
@@ -107,25 +109,25 @@ struct CollectiveMainloopFwdSm90 {
         make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
 
     using SmemLayoutAtomVt = decltype(cutlass::gemm::collective::detail::ss_smem_selector<TmaMajorV, Element,
-        decltype(cute::get<2>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>());
+        decltype(cute::get<2>(TileShape_MNK_VO{})), decltype(cute::get<1>(TileShape_MNK_VO{}))>());
     using SmemLayoutVt = decltype(tile_to_shape(
         SmemLayoutAtomVt{},
-        make_shape(shape<2>(TileShape_MNK{}), shape<1>(TileShape_MNK{}), Int<kStages>{}),
+        make_shape(shape<2>(TileShape_MNK_VO{}), shape<1>(TileShape_MNK_VO{}), Int<kStages>{}),
         std::conditional_t<TmaMajorV == GMMA::Major::K, cute::Step<_1, _2, _3>, cute::Step<_2, _1, _3>>{}));
 
     using SmemLayoutAtomVtMma = decltype(cutlass::gemm::collective::detail::ss_smem_selector<MmaMajorV, Element,
-        decltype(cute::get<2>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>());
+        decltype(cute::get<2>(TileShape_MNK_VO{})), decltype(cute::get<1>(TileShape_MNK_VO{}))>());
     using SmemLayoutVtMma = decltype(tile_to_shape(
         SmemLayoutAtomVtMma{},
-        make_shape(shape<2>(TileShape_MNK{}), shape<1>(TileShape_MNK{}), Int<kStages>{}),
+        make_shape(shape<2>(TileShape_MNK_VO{}), shape<1>(TileShape_MNK_VO{}), Int<kStages>{}),
         std::conditional_t<MmaMajorV == GMMA::Major::K, cute::Step<_1, _2, _3>, cute::Step<_2, _1, _3>>{}));
 
     // Only used if we're using cp.async to load V
     using SmemLayoutAtomVCpAsync = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
-        decltype(cute::get<1>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
+        decltype(cute::get<1>(TileShape_MNK_VO{})), decltype(cute::get<2>(TileShape_MNK_VO{}))>());
     using SmemLayoutVCpAsync = decltype(tile_to_shape(
         SmemLayoutAtomVCpAsync{},
-        make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
+        make_shape(shape<1>(TileShape_MNK_VO{}), shape<2>(TileShape_MNK_VO{}), Int<kStages>{})));
 
     using SmemLayoutAtomP = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GMMA::Major::K, Element,
         decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>());
@@ -221,14 +223,14 @@ struct CollectiveMainloopFwdSm90 {
         GmemTiledCopyKV{},
         make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2, 3>(StrideV{})),
         take<0, 2>(SmemLayoutVt{}),
-        select<2, 1>(TileShape_MNK{}),
+        select<2, 1>(TileShape_MNK_VO{}),
         size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
     // Set the bytes transferred in this TMA transaction (may involve multiple issues)
     static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(SmemLayoutQ{}) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutK{})) * cutlass::sizeof_bits_v<Element> / 8);
     static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutVt{})) * cutlass::sizeof_bits_v<Element> / 8);
-    static_assert(TmaTransactionBytesK == TmaTransactionBytesV);
+    // static_assert(TmaTransactionBytesK == TmaTransactionBytesV);
 
     using PipelineTmaAsync = std::conditional_t<CUTE_STATIC_V(size(ClusterShape{})) == 1, typename cutlass::PipelineTmaAsyncNoCluster<kStages>, typename cutlass::PipelineTmaAsync<kStages>>;
     using MainloopPipelineK = std::conditional_t<Use_TMA_KV, PipelineTmaAsync, typename cutlass::PipelineAsync<kStages>>;
@@ -294,6 +296,7 @@ struct CollectiveMainloopFwdSm90 {
         ShapeQKV const shape_K;
         StrideQK const stride_K;
         Element* const ptr_V;
+        ShapeQKV const shape_V;
         StrideV const stride_V;
         Element const* const ptr_K_new;
         ShapeQKV const shape_K_new;
@@ -335,6 +338,7 @@ struct CollectiveMainloopFwdSm90 {
         ShapeQKV const shape_K;
         StrideQK const stride_K;
         Element* const ptr_V;
+        ShapeQKV const shape_V;
         StrideV const stride_V;
         Element const* const ptr_K_new;
         ShapeQKV const shape_K_new;
@@ -388,12 +392,12 @@ struct CollectiveMainloopFwdSm90 {
             take<0, 2>(SmemLayoutK{}),
             TileShape_MNK{},
             ClusterShape{}); // mcast along M mode for this N load, if any
-        Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), select<1, 0, 2, 3>(args.shape_K), select<1, 0, 2, 3>(args.stride_V));
+        Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), select<1, 0, 2, 3>(args.shape_V), select<1, 0, 2, 3>(args.stride_V));
         TMA_V tma_load_V = make_tma_copy(
             GmemTiledCopyKV{},
             mV,
             take<0, 2>(SmemLayoutVt{}),
-            select<2, 1>(TileShape_MNK{}),
+            select<2, 1>(TileShape_MNK_VO{}),
             size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
         Tensor mKnew = make_tensor(make_gmem_ptr(args.ptr_K_new), args.shape_K_new, args.stride_K_new);
         TMA_K tma_load_K_new = make_tma_copy_B_sm90(
@@ -407,7 +411,7 @@ struct CollectiveMainloopFwdSm90 {
             GmemTiledCopyKV{},
             cute::conditional_return<AppendKV>(mVnew, mV),
             take<0, 2>(SmemLayoutVt{}),
-            select<2, 1>(TileShape_MNK{}),
+            select<2, 1>(TileShape_MNK_VO{}),
             size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
         // If PackGQA, reshape Q to be ((qhead_per_khead, seqlen_q), head_size, nhead_k, batch_size)
         int const qhead_per_khead = !PackGQA ? 1 : cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K));
@@ -429,7 +433,7 @@ struct CollectiveMainloopFwdSm90 {
         // (assigning it to params.softcap_val) and pre-multiply softcap_val * log2(e)
         // (assigning it to params.softmax_scale_log2).
         return {args.ptr_Q, args.shape_Q, args.stride_Q, shape_Q_packed, stride_Q_packed,
-                args.ptr_K, args.shape_K, args.stride_K, args.ptr_V, args.stride_V,
+                args.ptr_K, args.shape_K, args.stride_K, args.ptr_V, args.shape_V, args.stride_V,
                 args.ptr_K_new, args.shape_K_new, args.stride_K_new, args.ptr_V_new, args.stride_V_new,
                 args.ptr_rotary_cos, args.shape_rotary, args.stride_rotary_cos,
                 args.ptr_rotary_sin, args.stride_rotary_sin, args.is_rotary_interleaved,
@@ -560,7 +564,7 @@ struct CollectiveMainloopFwdSm90 {
         Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(m_block, _0{}));  // (M, K)
         // if (cute::thread0()) { printf("Varlen = %d, params.leftpad_k = %p, leftpad_k = %d\n", Varlen, params.leftpad_k, leftpad_k); }
         Tensor gK_TMA = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK_TMA), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));  // (N, K, _)
-        Tensor gVt_TMA = local_tile(domain_offset(make_coord(_0{}, seqlen_info.offset_k), mVt_TMA), select<2, 1>(TileShape_MNK{}), make_coord(_0{}, _));  // (K, N, _)
+        Tensor gVt_TMA = local_tile(domain_offset(make_coord(_0{}, seqlen_info.offset_k), mVt_TMA), select<2, 1>(TileShape_MNK_VO{}), make_coord(_0{}, _));  // (K, N, _)
 
         auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
         Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));  // (TMA)
@@ -1210,7 +1214,7 @@ struct CollectiveMainloopFwdSm90 {
         Tensor mVnewt_TMA = params.tma_load_V_new.get_tma_tensor(select<1, 0, 2, 3>(params.shape_K_new))(_, _, bidh_kv, !is_varlen_k_new ? bidb : 0);
 
         Tensor gKnew_TMA = local_tile(domain_offset(make_coord(seqlen_info.offset_k_new, _0{}), mKnew_TMA), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));  // (N, K, _)
-        Tensor gVnewt_TMA = local_tile(domain_offset(make_coord(_0{}, seqlen_info.offset_k_new), mVnewt_TMA), select<2, 1>(TileShape_MNK{}), make_coord(_0{}, _));  // (K, N, _)
+        Tensor gVnewt_TMA = local_tile(domain_offset(make_coord(_0{}, seqlen_info.offset_k_new), mVnewt_TMA), select<2, 1>(TileShape_MNK_VO{}), make_coord(_0{}, _));  // (K, N, _)
 
         auto block_tma_K_new = params.tma_load_K_new.get_slice(cluster_local_block_id.x);
         Tensor tKgKnew_TMA = group_modes<0, 3>(block_tma_K_new.partition_S(gKnew_TMA));  // (TMA, k)
@@ -1306,10 +1310,11 @@ struct CollectiveMainloopFwdSm90 {
 
         int const offset_k = seqlen_info.offset_k + seqlen_info.seqlen_k_og;
         Tensor gK = local_tile(domain_offset(make_coord(offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));  // (N, K, _)
-        Tensor gV = local_tile(domain_offset(make_coord(offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}));  // (N, K, _)
+        Tensor gV = local_tile(domain_offset(make_coord(offset_k, _0{}), mV), select<1, 2>(TileShape_MNK_VO{}), make_coord(_, _0{}));  // (N, K, _)
 
         static constexpr int kBlockN = get<1>(TileShape_MNK{});
         static constexpr int kHeadDim = get<2>(TileShape_MNK{});
+        static constexpr int kHeadDim_VO = get<2>(TileShape_MNK_VO{});
         int const offset_rotary = seqlen_info.seqlen_k_og + seqlen_info.leftpad_k;
         int const seqlen_k_new = seqlen_info.seqlen_k_new;
         using Rotary_t = Rotary<kBlockN, kHeadDim, NumMmaThreads, Element>;

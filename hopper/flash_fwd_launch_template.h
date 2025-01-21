@@ -25,7 +25,7 @@ using namespace cute;
 
 template <int Arch, int kHeadDim, int ClusterM, typename Element, typename ElementOut,
           bool Is_causal, bool Is_local, bool Has_softcap, bool Varlen, bool PagedKV, bool AppendKV,
-          bool PackGQA, bool Split, bool V_colmajor>
+          bool PackGQA, bool Split, bool V_colmajor, int kHeadDim_VO>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!(Is_causal && Is_local), "Causal and Local cannot be enabled at the same time");
     static_assert(!(AppendKV && V_colmajor), "AppendKV and V_colmajor cannot be enabled at the same time");
@@ -46,13 +46,14 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static constexpr bool Q_in_regs = Arch >= 90 ? false : std::get<4>(kBlockMN_kNWarps_Stages_RS);
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+    using TileShape_MNK_VO = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim_VO>>;
     using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
     using CollectiveMainloop = std::conditional_t<
         Arch >= 90,
-        flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, Element, float, cutlass::arch::Sm90, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV, Mma1_is_RS, IntraWGOverlap, PackGQA, Split, V_colmajor>,
+        flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, TileShape_MNK_VO, Element, float, cutlass::arch::Sm90, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV, Mma1_is_RS, IntraWGOverlap, PackGQA, Split, V_colmajor>,
         flash::CollectiveMainloopFwdSm80<kNWarps, kStages, Q_in_regs, TileShape_MNK, Element, float, cutlass::arch::Sm80, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV, PackGQA, Split>
     >;
-    using CollectiveEpilogue = flash::CollectiveEpilogueFwd<TileShape_MNK, ClusterShape, ElementOut, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, PackGQA, FP8_TransposeV>;
+    using CollectiveEpilogue = flash::CollectiveEpilogueFwd<TileShape_MNK_VO, ClusterShape, ElementOut, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, PackGQA, FP8_TransposeV>;
 
     static constexpr int NumProducerThreads = Arch >= 90 ? CollectiveMainloop::NumProducerThreads : CollectiveMainloop::NumMmaThreads;
     using SchedulerPersistent = std::conditional_t<Varlen,
@@ -93,6 +94,8 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
          params.d, params.h_k, !PagedKV ? batch_k : params.num_pages},  // shape_K
         {params.k_row_stride, _1{}, params.k_head_stride, !is_varlen_k ? params.k_batch_stride : 0},  // stride_K
         static_cast<Element*>(params.v_ptr),
+        {!PagedKV ? (!is_varlen_k ? params.seqlen_k : params.total_k) : params.page_size,
+         params.d_vo, params.h_k, !PagedKV ? batch_k : params.num_pages},  // shape_V
         v_strides,  // stride_V
         static_cast<Element const*>(params.knew_ptr),
         {!is_varlen_k_new ? params.seqlen_knew : params.total_knew, params.d, params.h_k, !is_varlen_k_new ? params.b : 1},  // shape_K_new
@@ -124,7 +127,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     };
     typename CollectiveEpilogue::Arguments epilogue_args {
         static_cast<ElementOut*>(!Split ? params.o_ptr : params.oaccum_ptr),
-        {seqlen_q, params.d, params.h, batch_q, params.num_splits},  // shape_O
+        {seqlen_q, params.d_vo, params.h, batch_q, params.num_splits},  // shape_O
         {!Split ? params.o_row_stride : params.oaccum_row_stride,
          _1{},
          !Split ? params.o_head_stride : params.oaccum_head_stride,
@@ -179,7 +182,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     CHECK_CUDA_KERNEL_LAUNCH();
 }
 
-template<int Arch, typename T, int kHeadDim, bool Split, bool PagedKV, bool Has_softcap, bool PackGQA>
+template<int Arch, typename T, int kHeadDim, bool Split, bool PagedKV, bool Has_softcap, bool PackGQA, int kHeadDim_VO>
 void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(sizeof(T) == 2 || sizeof(T) == 1, "Only 16bit and 8bit are supported");
     static constexpr bool Is_FP8 = cute::is_same_v<T, cutlass::float_e4m3_t> || cute::is_same_v<T, cutlass::float_e5m2_t>;
@@ -196,7 +199,7 @@ void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
                     // Only use Cluster if number of tiles along seqlen_q is even and not varlen
                     CLUSTER_SWITCH(cutlass::ceil_div(params.seqlen_q * (!PackGQA ? 1 : params.h / params.h_k), kBlockM) % 2 == 0, Use_cluster, [&] {
                         static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
-                        run_flash_fwd<Arch, kHeadDim, ClusterM, T, T_out, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV && Varlen, PackGQA, Split, V_colmajor>(params, stream);
+                        run_flash_fwd<Arch, kHeadDim, ClusterM, T, T_out, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV && Varlen, PackGQA, Split, V_colmajor, kHeadDim_VO>(params, stream);
                     });
                 });
             });
