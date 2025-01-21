@@ -50,7 +50,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     using PreprocessKernel = flash::FlashAttnBwdPreprocess<TileShape_MK, Element, ElementAccum, ArchTag, /*Clear_dQaccum=*/true, Varlen, TileShape_MK_VO>;
     typename PreprocessKernel::Arguments preprocess_args {
         static_cast<Element const*>(params.o_ptr),
-        {seqlen_q, params.d, params.h, batch_q},  // shape_O
+        {seqlen_q, params.d_vo, params.h, batch_q},  // shape_O
         {params.o_row_stride, _1{}, params.o_head_stride, !is_varlen_q ? params.o_batch_stride : 0},  // stride_O
         static_cast<Element const*>(params.do_ptr),
         {params.do_row_stride, _1{}, params.do_head_stride, !is_varlen_q ? params.do_batch_stride : 0},  // stride_dO
@@ -76,6 +76,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     CHECK_CUDA_KERNEL_LAUNCH();
 
     using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
+    using TileShape_MNK_VO = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim_VO>>;
     using ClusterShape = cute::Shape<_1, Int<1>, _1>;  // Currently doesn't not support cluster
     // Stages_dS_or_QSm80 is Stages_dS if Sm90 and Stages if Sm80
     static constexpr int Stages = Arch >= 90 ? 2 : Stages_dS_or_QSm80;
@@ -84,15 +85,15 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         Arch >= 90,
         flash::CollectiveMainloopBwdSm90<Stages, Stages_dO, Stages_dS, ClusterShape, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm90,
             Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
-            SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>,
+            SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs, TileShape_MNK_VO>,
         flash::CollectiveMainloopBwdSm80<Stages, Stages_dO, TileShape_MNK, Element, ElementAccum, cutlass::arch::Sm80,
             Is_causal, Is_local, Has_softcap, Varlen, Deterministic,
             SdP_swapAB, dKV_swapAB, dQ_swapAB, NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>
     >;
     using CollectiveEpilogue = std::conditional_t<
         !GQA,
-        flash::CollectiveEpilogueBwd<TileShape_MNK, Element, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV>,
-        flash::CollectiveEpilogueBwdGQA<TileShape_MNK, ElementAccum, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, Deterministic>
+        flash::CollectiveEpilogueBwd<TileShape_MNK, Element, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV, TileShape_MNK_VO>,
+        flash::CollectiveEpilogueBwdGQA<TileShape_MNK, ElementAccum, ArchTag, CollectiveMainloop::NumMmaThreads, Varlen, Deterministic, TileShape_MNK_VO>
     >;
     using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
     using AttnKernel = std::conditional_t<
@@ -109,8 +110,10 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         {seqlen_k, params.d, params.h_k, batch_k},  // shape_K
         {params.k_row_stride, _1{}, params.k_head_stride, !is_varlen_k ? params.k_batch_stride : 0},  // stride_K
         static_cast<Element const*>(params.v_ptr),
+        {seqlen_k, params.d_vo, params.h_k, batch_k},  // shape_V
         {params.v_row_stride, _1{}, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0},  // stride_V
         static_cast<Element const*>(params.do_ptr),
+        {seqlen_q, params.d_vo, params.h, batch_q},  // shape_dO
         {params.do_row_stride, _1{}, params.do_head_stride, !is_varlen_q ? params.do_batch_stride : 0},  // stride_dO
         static_cast<ElementAccum*>(params.dq_accum_ptr),
         {seqlen_q_rounded * params.d_rounded, params.h, batch_q},  // shape_dQaccum
@@ -148,9 +151,16 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         static_cast<typename CollectiveEpilogue::Element*>(!GQA ? params.dv_ptr : params.dv_accum_ptr),
         [&] {
             if constexpr (!GQA) {
+                return typename CollectiveEpilogue::ShapedKV {seqlen_k, params.d_vo, params.h, batch_k};  // shape_dV
+            } else {
+                return typename CollectiveEpilogue::ShapedKV {seqlen_k_rounded * params.d_vo_rounded, params.h_k, batch_k};  // shape_dVaccum
+            }
+        }(),
+        [&] {
+            if constexpr (!GQA) {
                 return typename CollectiveEpilogue::StridedKV {params.dv_row_stride, _1{}, params.dv_head_stride, !is_varlen_k ? params.dv_batch_stride : 0};  // stride_dV
             } else {
-                return typename CollectiveEpilogue::StridedKV {_1{}, params.d_rounded * seqlen_k_rounded, !is_varlen_k ? params.h_k * params.d_rounded * params.seqlen_k_rounded : 0};  // stride_dVaccum
+                return typename CollectiveEpilogue::StridedKV {_1{}, params.d_vo_rounded * seqlen_k_rounded, !is_varlen_k ? params.h_k * params.d_vo_rounded * params.seqlen_k_rounded : 0};  // stride_dVaccum
             }
         }(),
         params.h,
@@ -237,13 +247,20 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     CHECK_CUDA_KERNEL_LAUNCH();
 
     if constexpr (GQA) {
-        using TileShape_NK = cute::Shape<Int<kBlockN>, Int<kHeadDim>>;
-        using PostprocessKerneldKV = flash::FlashAttnBwdPostprocessConvertdQ<TileShape_NK, Element, ElementAccum, ArchTag,
+        using TileShape_NK_dK = cute::Shape<Int<kBlockN>, Int<kHeadDim>>;
+        using PostprocessKerneldK = flash::FlashAttnBwdPostprocessConvertdQ<TileShape_NK_dK, Element, ElementAccum, ArchTag,
             AttnKernel::CollectiveEpilogue::NumEpilogueThreads,
-            typename AttnKernel::CollectiveMainloop::TiledMmadKV,
+            typename AttnKernel::CollectiveMainloop::TiledMmadK,
             AttnKernel::CollectiveMainloop::dKV_swapAB
             >;
-        typename PostprocessKerneldKV::Arguments postprocess_dK_args {
+        using TileShape_NK_dV = cute::Shape<Int<kBlockN>, Int<kHeadDim_VO>>;
+        using PostprocessKerneldV = flash::FlashAttnBwdPostprocessConvertdQ<TileShape_NK_dV, Element, ElementAccum, ArchTag,
+            AttnKernel::CollectiveEpilogue::NumEpilogueThreads,
+            typename AttnKernel::CollectiveMainloop::TiledMmadV,
+            AttnKernel::CollectiveMainloop::dKV_swapAB
+            >;
+ 
+        typename PostprocessKerneldK::Arguments postprocess_dK_args {
             static_cast<ElementAccum const*>(params.dk_accum_ptr),
             {seqlen_k_rounded * params.d_rounded, params.h_k, batch_k},  // shape_dKaccum
             {_1{}, seqlen_k_rounded * params.d_rounded, !is_varlen_k ? params.d_rounded * params.seqlen_k_rounded * params.h_k : 0},  // stride_dKaccum
@@ -254,28 +271,29 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             params.cu_seqlens_k,
             params.seqused_k
         };
-        typename PostprocessKerneldKV::Params postprocess_dK_params = PostprocessKerneldKV::to_underlying_arguments(postprocess_dK_args);
-        typename PostprocessKerneldKV::Arguments postprocess_dV_args {
+        typename PostprocessKerneldK::Params postprocess_dK_params = PostprocessKerneldK::to_underlying_arguments(postprocess_dK_args);
+        typename PostprocessKerneldV::Arguments postprocess_dV_args {
             static_cast<ElementAccum const*>(params.dv_accum_ptr),
-            {seqlen_k_rounded * params.d_rounded, params.h_k, batch_k},  // shape_dVaccum
-            {_1{}, seqlen_k_rounded * params.d_rounded, !is_varlen_k ? params.d_rounded * params.seqlen_k_rounded * params.h_k : 0},  // stride_dVaccum
+            {seqlen_k_rounded * params.d_vo_rounded, params.h_k, batch_k},  // shape_dVaccum
+            {_1{}, seqlen_k_rounded * params.d_vo_rounded, !is_varlen_k ? params.d_vo_rounded * params.seqlen_k_rounded * params.h_k : 0},  // stride_dVaccum
             static_cast<Element*>(params.dv_ptr),
-            {seqlen_k, params.d, params.h_k, batch_k},  // shape_dV
+            {seqlen_k, params.d_vo, params.h_k, batch_k},  // shape_dV
             {params.dv_row_stride, _1{}, params.dv_head_stride, params.dv_batch_stride},  // stride_dV
             1.f,
             params.cu_seqlens_k,
             params.seqused_k
         };
-        typename PostprocessKerneldKV::Params postprocess_dV_params = PostprocessKerneldKV::to_underlying_arguments(postprocess_dV_args);
-        int num_n_block_postprocess = cute::ceil_div(params.seqlen_k, get<0>(TileShape_NK{}));
+        typename PostprocessKerneldV::Params postprocess_dV_params = PostprocessKerneldV::to_underlying_arguments(postprocess_dV_args);
+        int num_n_block_postprocess = cute::ceil_div(params.seqlen_k, get<0>(TileShape_NK_dK{}));
         dim3 grid_n_postprocess(num_n_block_postprocess, params.h_k, params.b);
-        int smem_size_postprocess = PostprocessKerneldKV::SharedStorageSize;
+        int smem_size_postprocess = PostprocessKerneldK::SharedStorageSize;
         if (smem_size_postprocess >= 48 * 1024) {
-            CHECK_CUDA(cudaFuncSetAttribute(cutlass::device_kernel<PostprocessKerneldKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_postprocess));
+            CHECK_CUDA(cudaFuncSetAttribute(cutlass::device_kernel<PostprocessKerneldK>, cudaFuncAttributeMaxDynamicSharedMemorySize, PostprocessKerneldK::SharedStorageSize));
+            CHECK_CUDA(cudaFuncSetAttribute(cutlass::device_kernel<PostprocessKerneldV>, cudaFuncAttributeMaxDynamicSharedMemorySize, PostprocessKerneldV::SharedStorageSize));
         }
-        cutlass::kernel_launch<PostprocessKerneldKV>(grid_n_postprocess, PostprocessKerneldKV::MaxThreadsPerBlock, smem_size_postprocess, stream, postprocess_dK_params, false /*launch_with_pdl*/);
+        cutlass::kernel_launch<PostprocessKerneldK>(grid_n_postprocess, PostprocessKerneldK::MaxThreadsPerBlock, PostprocessKerneldK::SharedStorageSize, stream, postprocess_dK_params, false /*launch_with_pdl*/);
         CHECK_CUDA_KERNEL_LAUNCH();
-        cutlass::kernel_launch<PostprocessKerneldKV>(grid_n_postprocess, PostprocessKerneldKV::MaxThreadsPerBlock, smem_size_postprocess, stream, postprocess_dV_params, false /*launch_with_pdl*/);
+        cutlass::kernel_launch<PostprocessKerneldV>(grid_n_postprocess, PostprocessKerneldV::MaxThreadsPerBlock, PostprocessKerneldV::SharedStorageSize, stream, postprocess_dV_params, false /*launch_with_pdl*/);
         CHECK_CUDA_KERNEL_LAUNCH();
     }
 
@@ -354,11 +372,15 @@ template<int Arch, typename T, bool Has_softcap, int kHeadDim_VO=192>
 void run_mha_bwd_hdim192(Flash_bwd_params &params, cudaStream_t stream) {
     CAUSAL_LOCAL_SWITCH(params.is_causal, params.is_local, Is_causal, Is_local, [&] {
         if constexpr (Arch >= 90) {
-            run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 3, 1, 1, 1, false, kHeadDim_VO>(params, stream);
+            if constexpr (kHeadDim_VO == 128) {
+                run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 2, 1, 1, 1, false, kHeadDim_VO>(params, stream);
+            } else {
+                run_mha_bwd_dispatch<Arch, T, 64, 96, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, true, false, 3, 1, 1, 1, false>(params, stream);
+            }
         } else if constexpr (Arch == 86 || Arch == 89) {
-            run_mha_bwd_dispatch<Arch, T, 64, 64, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, false, false, 2, 2, 2, 2, true, kHeadDim_VO>(params, stream);
+            run_mha_bwd_dispatch<Arch, T, 64, 64, 192, Is_causal, Is_local, Has_softcap, 1, 1, false, false, false, 2, 2, 2, 2, true>(params, stream);
         } else {
-            run_mha_bwd_dispatch<Arch, T, 64, 80, 192, Is_causal, Is_local, Has_softcap, 1, 2, false, true, false, 2, 4, 2, 2, false, kHeadDim_VO>(params, stream);
+            run_mha_bwd_dispatch<Arch, T, 64, 80, 192, Is_causal, Is_local, Has_softcap, 1, 2, false, true, false, 2, 4, 2, 2, false>(params, stream);
         }
     });
 }

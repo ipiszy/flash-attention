@@ -17,6 +17,14 @@
 
 namespace flash {
 
+template <int A, int B>
+__device__
+constexpr void
+assert_eq() {
+    static_assert(A == B);
+}
+
+
 using namespace cute;
 
 template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, int kNThreads, class TiledMma, bool dQ_swapAB>
@@ -206,6 +214,8 @@ public:
         // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1) { print(tiled_mma_dQ); printf("\n"); }
         // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1) { print(tdQsdQaccum); }
         // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 1) { print(taccdQrdQaccum); }
+        assert_eq<size(sdQaccum), size(taccdQrdQaccum) * kNThreads>;
+        assert_eq<size(taccdQrdQaccum), size(tdQsdQaccum)>;
         CUTE_STATIC_ASSERT_V(size(taccdQrdQaccum) == size(tdQsdQaccum));
         Tensor tdQrdQaccum = s2r_thr_copy_dQaccum.retile_D(taccdQrdQaccum);
         cute::copy(s2r_tiled_copy_dQaccum, tdQsdQaccum, tdQrdQaccum);
