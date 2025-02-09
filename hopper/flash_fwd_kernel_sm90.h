@@ -14,6 +14,7 @@
 #include <cutlass/kernel_hardware_info.h>
 #include "cutlass/pipeline/pipeline.hpp"
 
+#include "flash.h"
 #include "seqlen.h"
 #include "utils.h"
 #include "softmax.h"
@@ -59,6 +60,7 @@ public:
     using MainloopArguments = typename CollectiveMainloop::Arguments;
     using MainloopParams = typename CollectiveMainloop::Params;
     using BarrierQ = std::conditional_t<Use_TMA_Q, cutlass::arch::ClusterTransactionBarrier, cutlass::arch::ClusterBarrier>;
+    using BarrierQScale = cutlass::arch::ClusterTransactionBarrier;
 
     // Epilogue derived types
     using EpilogueArguments = typename CollectiveEpilogue::Arguments;
@@ -78,12 +80,12 @@ public:
 
     /// Register requirement for Load and Math WGs
     // If we use cp.async to load K and V, we need more registers for the producer WG.
-    static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
-    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
+    // static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
+    // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
     // If you want to print from the producer warp, you'd need to increase the number of registers
     // Otherwise you'll get CUDA error.
-    // static constexpr uint32_t LoadRegisterRequirement = 40;
-    // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+    static constexpr uint32_t LoadRegisterRequirement = 40;
+    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
     // Kernel level shared memory storage
     // We overlap the shared memory for the mainloop and epilogue. However, we only want smem_o to overlap with smem_v
@@ -103,6 +105,7 @@ public:
         } tensors;
         struct PipelineStorage : cute::aligned_struct<16, _1> {
             alignas(16) BarrierQ barrier_Q;
+            alignas(16) BarrierQScale barrier_Q_scale;
             alignas(16) BarrierQ barrier_Qv;
             alignas(16) cutlass::arch::ClusterBarrier barrier_O;
             alignas(16) typename CollectiveMainloop::MainloopPipelineK::SharedStorage pipeline_k;
@@ -208,6 +211,7 @@ public:
 
         if (warp_idx == 0 && lane_predicate) {
             shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
+            shared_storage.pipelines.barrier_Q_scale.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
             if constexpr (HasQv) {
                 shared_storage.pipelines.barrier_Qv.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
             }
@@ -221,6 +225,9 @@ public:
             : MainloopPipelineK::ThreadCategory::Consumer;
         if constexpr (Use_TMA_KV) {
             pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
+            if constexpr (Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQKVToken) {
+                pipeline_params_k.transaction_bytes += CollectiveMainloop::TmaTransactionBytesKPerTokenScale;
+            }
             pipeline_params_k.is_leader = warp_group_thread_idx == 0;
             pipeline_params_k.num_consumers = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
         } else {
@@ -230,7 +237,7 @@ public:
 
         static_assert(is_same_v<PipelineParamsK, PipelineParamsVt>);
         PipelineParamsVt pipeline_params_vt = pipeline_params_k;
-        if constexpr (Use_TMA_KV && !SameHeadDim) {
+        if constexpr (Use_TMA_KV) {
             pipeline_params_vt.transaction_bytes = CollectiveMainloop::TmaTransactionBytesV;
             if constexpr (LargeHeadDimV) { pipeline_params_vt.num_consumers = NumMmaThreads; }
         } else {
@@ -327,6 +334,7 @@ public:
                  work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info) : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
                 auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+                // CUTE_LOG("producer begin: block_coord = %d, %d, %d\n", get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
                 SeqlenInfo_t seqlen_info{
                     get<2>(block_coord) /*bidb*/,
                     get<0>(params.mainloop.shape_Q),
@@ -351,8 +359,10 @@ public:
                 // pipeline_vt won't be used if we don't need to transpose V.
                 collective_mainloop.load(params.mainloop, pipeline_k, pipeline_v, pipeline_vt, smem_pipe_write,
                                          shared_storage, scheduler_prefetch, seqlen_info, block_coord, work_idx);
+                // CUTE_LOG("producer end: block_coord = %d, %d, %d\n", get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
             }
             collective_mainloop.load_tail(pipeline_k, pipeline_v, pipeline_vt, smem_pipe_write, shared_storage, work_idx);
+            // CUTE_LOG("%s\n", "producer exit");
         } else {  // Consumer
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
 
@@ -378,13 +388,16 @@ public:
                 float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
                 // If there's tanh softcap, the scaling will be done before tanh.
                 auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+                // CUTE_LOG("consumer begin: block_coord = %d, %d, %d\n", get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
                 int const bidb = get<2>(block_coord);
                 if constexpr (Is_FP8 && !Has_softcap) {
                     int const bidh = get<1>(block_coord);
                     int const bidh_kv = !PackGQA ? params.mainloop.qhead_per_khead_divmod.divide(bidh) : bidh;
-                    float const q_descale = params.mainloop.ptr_q_descale == nullptr ? 1.0f : params.mainloop.ptr_q_descale[bidb * get<0>(params.mainloop.stride_q_descale) + bidh_kv * get<1>(params.mainloop.stride_q_descale)];
-                    float const k_descale = params.mainloop.ptr_k_descale == nullptr ? 1.0f : params.mainloop.ptr_k_descale[bidb * get<0>(params.mainloop.stride_k_descale) + bidh_kv * get<1>(params.mainloop.stride_k_descale)];
-                    softmax_scale_log2 *= q_descale * k_descale;
+                    if constexpr (CollectiveMainloop::kScalingRecipe != ScalingRecipe::PerQKVToken) {
+                        float const q_descale = params.mainloop.ptr_q_descale == nullptr ? 1.0f : params.mainloop.ptr_q_descale[bidb * get<0>(params.mainloop.stride_q_descale) + bidh_kv * get<1>(params.mainloop.stride_q_descale)];
+                        float const k_descale = params.mainloop.ptr_k_descale == nullptr ? 1.0f : params.mainloop.ptr_k_descale[bidb * get<0>(params.mainloop.stride_k_descale) + bidh_kv * get<1>(params.mainloop.stride_k_descale)];
+                        softmax_scale_log2 *= q_descale * k_descale;
+                    }
                 }
                 flash::Softmax<!LargeHeadDimV ? 2 * (2 * kBlockM / NumMmaThreads) : 2, /*Max_offset=*/!Is_FP8 ? 0 : 8> softmax(softmax_scale_log2);
 
@@ -439,8 +452,10 @@ public:
                     collective_epilogue.template store_zero<!Split /*Clear_O*/>(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
                     // collective_epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
                 }
+                // CUTE_LOG("consumer end: block_coord = %d, %d, %d\n", get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
             }
             collective_epilogue.store_tail();
+            // CUTE_LOG("%s\n", "consumer exit");
         }
 
     }

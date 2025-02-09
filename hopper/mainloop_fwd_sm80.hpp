@@ -149,6 +149,7 @@ struct CollectiveMainloopFwdSm80 {
     using StridePageTable = cute::Stride<int64_t, _1>;
     using ShapeRotary = cute::Shape<int32_t, int32_t>;  // (seqlen_ro, rotary_dim // 2)
     using StrideRotary = cute::Stride<int64_t, _1>;
+    using ShapeDescale = cute::Stride<int64_t, int64_t>;
     using StrideDescale = cute::Stride<int64_t, int64_t>;
 
     static constexpr bool Share_QV_Smem = Q_in_regs;
@@ -198,6 +199,7 @@ struct CollectiveMainloopFwdSm80 {
         StridePageTable const stride_pagetable;
         float const softmax_scale;
         float const* ptr_q_descale, *ptr_k_descale, *ptr_v_descale;
+        ShapeDescale const shape_q_descale, shape_k_descale;
         StrideDescale const stride_q_descale, stride_k_descale, stride_v_descale;
         int const window_size_left = -1, window_size_right = -1, sink_token_length = 0;
         float const softcap_val;

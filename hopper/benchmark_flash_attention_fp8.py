@@ -29,6 +29,7 @@ try:
     import cudnn
 except ImportError:
     cudnn = None
+# cudnn = None
 
 
 def convert_to_cudnn_type(torch_type):
@@ -220,21 +221,26 @@ device = 'cuda'
 dtype = torch.float8_e4m3fn
 
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4224), (2, 8448), (1, 8448 * 2)]
-bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 8192 * 2)]
+# bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 8192 * 2)]
+bs_seqlen_vals = [(1, 2048 * 8)]
+# bs_seqlen_vals = [(1, 128)]
 # bs_seqlen_vals = [(4, 4096), (2, 8192), (1, 8192 * 2)]
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048)]
-causal_vals = [False, True]
-headdim_vals = [64, 128, 256]
+# causal_vals = [False, True]
+causal_vals = [True]
+# headdim_vals = [64, 128, 256]
+headdim_vals = [128]
 dim = 2048
 # dim = 256
 dropout_p = 0.0
+use_per_token_scale = True
 
 methods = (["Pytorch", "Flash3"]
         + (["cuDNN"] if cudnn is not None else [])
         # + (["Triton"] if attention_triton is not None else [])
         #    + (["xformers.c"] if xops is not None else [])
         #    + (["xformers.f"] if xops is not None else [])
-           )
+        )
 
 time_f = {}
 time_b = {}
@@ -256,32 +262,41 @@ for causal in causal_vals:
             time_f[config, "Pytorch"] = f
             res_baseline = attention_pytorch(qkv, dropout_p, causal=causal)
 
-            if attention_triton is not None:
-                q_transposed = q.transpose(1, 2).contiguous().to(torch.float8_e4m3fn)
-                k_transposed = k.transpose(1, 2).contiguous().to(torch.float8_e4m3fn)
-                v_transposed = v.transpose(1, 2).contiguous().permute(0, 1, 3, 2).to(torch.float8_e4m3fn)
-                scale = 1 / math.sqrt(headdim)
-                f = time_fwd(
-                    attention_triton, q_transposed, k_transposed, v_transposed,
-                    causal, scale, repeats=5, verbose=False, desc='Triton'
-                )
-                f = time_fwd(
-                    attention_triton, q_transposed, k_transposed, v_transposed,
-                    causal, scale, repeats=repeats, verbose=False, desc='Triton'
-                )
-                time_f[config, "Triton"] = f
-                res = attention_triton(
-                    q_transposed, k_transposed, v_transposed.permute(0, 1, 3, 2),
-                    causal, scale
-                ).half().transpose(1, 2)
-                torch.testing.assert_close(res, res_baseline, atol=0.5, rtol=0.5)
+            # if attention_triton is not None:
+            #     q_transposed = q.transpose(1, 2).contiguous().to(torch.float8_e4m3fn)
+            #     k_transposed = k.transpose(1, 2).contiguous().to(torch.float8_e4m3fn)
+            #     v_transposed = v.transpose(1, 2).contiguous().permute(0, 1, 3, 2).to(torch.float8_e4m3fn)
+            #     scale = 1 / math.sqrt(headdim)
+            #     f = time_fwd(
+            #         attention_triton, q_transposed, k_transposed, v_transposed,
+            #         causal, scale, repeats=5, verbose=False, desc='Triton'
+            #     )
+            #     f = time_fwd(
+            #         attention_triton, q_transposed, k_transposed, v_transposed,
+            #         causal, scale, repeats=repeats, verbose=False, desc='Triton'
+            #     )
+            #     time_f[config, "Triton"] = f
+            #     res = attention_triton(
+            #         q_transposed, k_transposed, v_transposed.permute(0, 1, 3, 2),
+            #         causal, scale
+            #     ).half().transpose(1, 2)
+            #     torch.testing.assert_close(res, res_baseline, atol=0.5, rtol=0.5)
 
             # out = torch.empty_like(q)
             q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
             softmax_scale = q.shape[-1] ** (-0.5)
-            descale_q = torch.tensor([1.0], dtype=torch.float32, device='cuda')
-            descale_k = torch.tensor([1.0], dtype=torch.float32, device='cuda')
-            descale_v = torch.tensor([1.0], dtype=torch.float32, device='cuda')
+            q_descale = (
+                torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
+                if not use_per_token_scale 
+                else torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
+            )
+            k_descale = (
+                torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
+                if not use_per_token_scale 
+                else torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
+            )
+            v_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
+            print(f"{q_descale.shape=}, {q_descale.stride()=}, {k_descale.shape=}, {k_descale.stride()=}", flush=True)
 
             # f = time_fwd(flash_attn_func, q, k, v, causal=causal, repeats=repeats, verbose=False)
             f = time_fwd(
@@ -289,12 +304,24 @@ for causal in causal_vals:
                 q, 
                 k, 
                 v, 
-                softmax_scale, 
+                None, None,  # k_new, v_new
+                None,  # qv
+                None,  # out
+                None, None, None,   # cu_seqlens_q/k/k_new
+                None, None,   # seqused_q/k
+                None, None,   # max_seqlen_q/k
+                None, None, None,   # page_table, kv_batch_idx, leftpad_k,
+                None, None,  # rotary_cos/sin
+                q_descale, k_descale, v_descale,
+                softmax_scale,
                 causal=causal,
                 window_size=(-1,-1),
-                descale_q=descale_q, 
-                descale_k=descale_k, 
-                descale_v=descale_v, 
+                sink_token_length=0,
+                softcap=0.0,
+                num_splits=1,
+                pack_gqa=None,
+                sm_margin=0,
+                use_per_token_scale=use_per_token_scale,
                 repeats=repeats, 
                 verbose=False
             )

@@ -390,7 +390,7 @@ inline bool get_pack_gqa(Flash_fwd_params const& params) {
     // params.page_table must already be set
     if (params.h == params.h_k) { return false; }
     // This needs to match the kernel configs
-    auto kBlockMN_kernel_args_sm90 = tile_size_fwd_sm90(params.d_rounded, params.dv_rounded, params.is_causal, params.is_local, params.is_e4m3 ? 1 : 2 /*element_size*/, false /*v_colmajor*/, params.page_table, params.softcap > 0.f);
+    auto kBlockMN_kernel_args_sm90 = tile_size_fwd_sm90(params.d_rounded, params.dv_rounded, params.is_causal, params.is_local, params.is_e4m3 ? 1 : 2 /*element_size*/, false /*v_colmajor*/, params.page_table, params.softcap > 0.f, params.scaling_recipe);
     int const kBlockM = std::get<0>(kBlockMN_kernel_args_sm90);
     return should_pack_gqa(params.cu_seqlens_q || params.seqused_q, params.seqlen_q, params.h / params.h_k, kBlockM);
     #endif
@@ -404,7 +404,7 @@ inline int get_num_splits(Flash_fwd_params const& params) {
     // params.page_table must already be set
     // This needs to match the kernel configs
     bool varlen = params.cu_seqlens_q || params.cu_seqlens_k || params.seqused_q || params.seqused_k || params.leftpad_k;
-    auto kBlockMN_kernel_args_sm90 = tile_size_fwd_sm90(params.d_rounded, params.dv_rounded, params.is_causal, params.is_local, params.is_e4m3 ? 1 : 2 /*element_size*/, false /*v_colmajor*/, params.page_table, params.softcap > 0.f);
+    auto kBlockMN_kernel_args_sm90 = tile_size_fwd_sm90(params.d_rounded, params.dv_rounded, params.is_causal, params.is_local, params.is_e4m3 ? 1 : 2 /*element_size*/, false /*v_colmajor*/, params.page_table, params.softcap > 0.f, params.scaling_recipe);
     // Strictly speaking we need to pass in (varlen && params.num_splits > 1) but num_splits
     // has not been set here. It's OK though because we might just underestimate kBlockN a bit
     auto kBlockMN_kernel_args_sm8x = tile_size_fwd_sm8x(params.arch == 86 || params.arch == 89, params.d_rounded, params.dv_rounded, params.is_causal, params.is_local, params.is_e4m3 ? 1 : 2 /*element_size*/, params.page_table, varlen, params.softcap > 0.f, params.knew_ptr);
@@ -503,7 +503,8 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         bool const is_rotary_interleaved,   // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
         int num_splits,
         std::optional<bool> pack_gqa_,
-        int const sm_margin
+        int const sm_margin,
+        bool use_per_token_scale
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -857,23 +858,44 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     }
 
     if (q_type == at::ScalarType::Float8_e4m3fn) {
+        if (!use_per_token_scale) {
+            params.scaling_recipe = ScalingRecipe::PerKVHead;
+        } else {
+            params.scaling_recipe = ScalingRecipe::PerQKVToken;
+        }
         if (q_descale_.has_value()) {
             auto q_descale = q_descale_.value();
             CHECK_DEVICE(q_descale);
-            CHECK_SHAPE(q_descale, batch_size, num_heads_k);
+            if (!use_per_token_scale) {
+                // TODO:
+                // Per-K head scaling.
+                CHECK_SHAPE(q_descale, batch_size, num_heads_k);
+                params.q_descale_batch_stride = q_descale.stride(0);
+                params.q_descale_head_stride = q_descale.stride(1);
+            } else {
+                // Per-token scaling
+                CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128 * 128, num_heads);
+                params.q_descale_head_stride = q_descale.stride(1);
+            }
             params.q_descale_ptr = q_descale.data_ptr<float>();
-            params.q_descale_batch_stride = q_descale.stride(0);
-            params.q_descale_head_stride = q_descale.stride(1);
         } else {
             params.q_descale_ptr = nullptr;
         }
         if (k_descale_.has_value()) {
             auto k_descale = k_descale_.value();
             CHECK_DEVICE(k_descale);
-            CHECK_SHAPE(k_descale, batch_size, num_heads_k);
+            if (!use_per_token_scale) {
+                // TODO:
+                // Per-K head scaling.
+                CHECK_SHAPE(k_descale, batch_size, num_heads_k);
+                params.k_descale_batch_stride = k_descale.stride(0);
+                params.k_descale_head_stride = k_descale.stride(1);
+            } else {
+                // Per-token scaling
+                CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256 * 256, num_heads);
+                params.k_descale_head_stride = k_descale.stride(1);
+            }
             params.k_descale_ptr = k_descale.data_ptr<float>();
-            params.k_descale_batch_stride = k_descale.stride(0);
-            params.k_descale_head_stride = k_descale.stride(1);
         } else {
             params.k_descale_ptr = nullptr;
         }
