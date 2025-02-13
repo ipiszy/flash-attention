@@ -233,7 +233,8 @@ headdim_vals = [128]
 dim = 2048
 # dim = 256
 dropout_p = 0.0
-use_per_token_scale = True
+
+scaling_recipe = 1
 
 methods = (["Pytorch", "Flash3"]
         + (["cuDNN"] if cudnn is not None else [])
@@ -287,12 +288,12 @@ for causal in causal_vals:
             softmax_scale = q.shape[-1] ** (-0.5)
             q_descale = (
                 torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
-                if not use_per_token_scale 
+                if scaling_recipe == 0
                 else torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
             )
             k_descale = (
                 torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
-                if not use_per_token_scale 
+                if scaling_recipe == 0
                 else torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
             )
             v_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
@@ -321,7 +322,7 @@ for causal in causal_vals:
                 num_splits=1,
                 pack_gqa=None,
                 sm_margin=0,
-                use_per_token_scale=use_per_token_scale,
+                scaling_recipe=scaling_recipe,
                 repeats=repeats, 
                 verbose=False
             )

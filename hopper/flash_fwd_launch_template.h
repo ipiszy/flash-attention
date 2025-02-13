@@ -31,7 +31,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     static_assert(!(AppendKV && V_colmajor), "AppendKV and V_colmajor cannot be enabled at the same time");
     static_assert(!(AppendKV && !Varlen), "AppendKV requires Varlen");
     static constexpr bool Is_FP8 = cute::is_same_v<Element, cutlass::float_e4m3_t> || cute::is_same_v<Element, cutlass::float_e5m2_t>;
-    static_assert(Scaling_Recipe != ScalingRecipe::PerQKVToken || Is_FP8, "Scaling recipe is only set for FP8.");
+    static_assert(Scaling_Recipe == ScalingRecipe::PerKVHead || Is_FP8, "Scaling recipe is only set for FP8.");
     static constexpr bool FP8_TransposeV = Is_FP8 && !V_colmajor;
     using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
@@ -120,10 +120,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         // Here, we make GMEM tensor shape [num_q_scales, h], stride[1, num_q_scales], SMEM tensor shape [128, 1].
         // In this case, we can actually use [128] (i.e. rank=1) as SMEM tensor layout.
         // This makes coding a bit easier.
-        {(params.total_q + params.b * 128) / 128 * 128, params.h},
-        {(params.total_k + params.b * 256) / 256 * 256, params.h},
-        (params.scaling_recipe == 1) ? cute::make_stride(1l, params.q_descale_head_stride) : cute::make_stride(params.q_descale_batch_stride, params.q_descale_head_stride),
-        (params.scaling_recipe == 1) ? cute::make_stride(1l, params.k_descale_head_stride) : cute::make_stride(params.k_descale_batch_stride, params.k_descale_head_stride),
+        {params.q_descale_len, params.h},
+        {params.k_descale_len, params.h},
+        (params.scaling_recipe) ? cute::make_stride(1l, params.q_descale_head_stride) : cute::make_stride(params.q_descale_batch_stride, params.q_descale_head_stride),
+        (params.scaling_recipe) ? cute::make_stride(1l, params.k_descale_head_stride) : cute::make_stride(params.k_descale_batch_stride, params.k_descale_head_stride),
         {params.v_descale_batch_stride, params.v_descale_head_stride},
         params.window_size_left, params.window_size_right, params.sink_token_length,
         params.softcap,

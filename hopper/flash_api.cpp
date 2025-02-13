@@ -504,7 +504,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int num_splits,
         std::optional<bool> pack_gqa_,
         int const sm_margin,
-        bool use_per_token_scale
+        int scaling_recipe
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -858,24 +858,31 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     }
 
     if (q_type == at::ScalarType::Float8_e4m3fn) {
-        if (!use_per_token_scale) {
-            params.scaling_recipe = ScalingRecipe::PerKVHead;
-        } else {
-            params.scaling_recipe = ScalingRecipe::PerQKVToken;
-        }
+        params.scaling_recipe = ScalingRecipe(scaling_recipe);
         if (q_descale_.has_value()) {
             auto q_descale = q_descale_.value();
             CHECK_DEVICE(q_descale);
-            if (!use_per_token_scale) {
-                // TODO:
-                // Per-K head scaling.
-                CHECK_SHAPE(q_descale, batch_size, num_heads_k);
-                params.q_descale_batch_stride = q_descale.stride(0);
-                params.q_descale_head_stride = q_descale.stride(1);
-            } else {
-                // Per-token scaling
-                CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128 * 128, num_heads);
-                params.q_descale_head_stride = q_descale.stride(1);
+            switch (scaling_recipe) {
+                case ScalingRecipe::PerKVHead:
+                    // Per-K head scaling.
+                    CHECK_SHAPE(q_descale, batch_size, num_heads_k);
+                    params.q_descale_batch_stride = q_descale.stride(0);
+                    params.q_descale_head_stride = q_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQKVToken:
+                    // Per-token scaling
+                    CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128 * 128, num_heads);
+                    params.q_descale_len = q_descale.size(0);
+                    params.q_descale_head_stride = q_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQTokenKVBlock:
+                    // Per-block scaling
+                    CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128, num_heads);
+                    params.q_descale_len = q_descale.size(0);
+                    params.q_descale_head_stride = q_descale.stride(1);
+                    break;
+                default:
+                    TORCH_CHECK(false, "Invalid scaling recipe: " + std::to_string(scaling_recipe));
             }
             params.q_descale_ptr = q_descale.data_ptr<float>();
         } else {
@@ -884,16 +891,27 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         if (k_descale_.has_value()) {
             auto k_descale = k_descale_.value();
             CHECK_DEVICE(k_descale);
-            if (!use_per_token_scale) {
-                // TODO:
-                // Per-K head scaling.
-                CHECK_SHAPE(k_descale, batch_size, num_heads_k);
-                params.k_descale_batch_stride = k_descale.stride(0);
-                params.k_descale_head_stride = k_descale.stride(1);
-            } else {
-                // Per-token scaling
-                CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256 * 256, num_heads);
-                params.k_descale_head_stride = k_descale.stride(1);
+            switch (scaling_recipe) {
+                case ScalingRecipe::PerKVHead:
+                    // TODO:
+                    // Per-K head scaling.
+                    CHECK_SHAPE(k_descale, batch_size, num_heads_k);
+                    params.k_descale_batch_stride = k_descale.stride(0);
+                    params.k_descale_head_stride = k_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQKVToken:
+                    // Per-token scaling
+                    CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256 * 256, num_heads);
+                    params.k_descale_len = k_descale.size(0);
+                    params.k_descale_head_stride = k_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQTokenKVBlock:
+                    CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256, num_heads);
+                    params.k_descale_len = k_descale.size(0);
+                    params.k_descale_head_stride = k_descale.stride(1);
+                    break;
+                default:
+                    TORCH_CHECK(false, "Invalid scaling recipe: " + std::to_string(scaling_recipe));
             }
             params.k_descale_ptr = k_descale.data_ptr<float>();
         } else {

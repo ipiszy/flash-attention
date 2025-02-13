@@ -186,6 +186,9 @@
       if ((SCALING_RECIPE) == ScalingRecipe::PerQKVToken) {                                      \
         constexpr static ScalingRecipe CONST_NAME = ScalingRecipe::PerQKVToken;                  \
         return __VA_ARGS__();                                                                    \
+      } else if ((SCALING_RECIPE) == ScalingRecipe::PerQTokenKVBlock) {                          \
+        constexpr static ScalingRecipe CONST_NAME = ScalingRecipe::PerQTokenKVBlock;             \
+        return __VA_ARGS__();                                                                    \
       } else {                                                                                   \
         constexpr static ScalingRecipe CONST_NAME = ScalingRecipe::PerKVHead;                    \
         return __VA_ARGS__();                                                                    \

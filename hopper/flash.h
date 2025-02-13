@@ -37,6 +37,7 @@ struct Qkv_params {
 enum ScalingRecipe {
     PerKVHead = 0,
     PerQKVToken,
+    PerQTokenKVBlock
 };
 
 struct Flash_fwd_params : public Qkv_params {
@@ -66,6 +67,8 @@ struct Flash_fwd_params : public Qkv_params {
     index_t k_descale_head_stride;
     index_t v_descale_batch_stride;
     index_t v_descale_head_stride;
+    int q_descale_len;
+    int k_descale_len;
 
     // The dimensions.
     int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
