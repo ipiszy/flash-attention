@@ -14,7 +14,8 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(
         bool v_colmajor=false, bool paged_kv=false, bool softcap=false, 
         ScalingRecipe scaling_recipe=ScalingRecipe::PerKVHead) {
     // int kOffset = (scaling_recipe == ScalingRecipe::PerQKVToken ? (headdim % 64 == 0 ? 32 : 64) : 0);
-    int kOffset = (headdim % 64 == 0 ? 32 : 64);
+    // int kOffset = (headdim % 64 == 0 ? 32 : 64);
+    int kOffset = (headdim % 64 == 0 ? 64: 64);
     if (element_size == 2) {
         if (headdim <= 64) {
             bool same_hdim = (headdim == headdim_v);  // if not same hdim, we're targeting hdimv=512
