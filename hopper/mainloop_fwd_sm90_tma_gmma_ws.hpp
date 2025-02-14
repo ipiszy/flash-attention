@@ -128,7 +128,10 @@ struct CollectiveMainloopFwdSm90 {
     using SmemLayoutK = decltype(tile_to_shape(
         SmemLayoutAtomK{},
         make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{}), Int<kStages>{})));
+
     using SmemLayoutKPerTokenScale = Layout<Shape<Int<kBlockN>, Int<kStages>>>;
+    using SmemLayoutKPerBlockScaleCopyAtom = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<float>, float>;
+    using SmemLayoutKPerBlockScale = Layout<Shape<Int<kStages>>, Stride<_1>>;
 
     using SmemLayoutAtomVt = decltype(cutlass::gemm::collective::detail::ss_smem_selector<TmaMajorV, Element,
         decltype(cute::get<1>(TileShape_MNK_PV{})), decltype(cute::get<2>(TileShape_MNK_PV{}))>());
@@ -241,7 +244,7 @@ struct CollectiveMainloopFwdSm90 {
     using StrideRotary = cute::Stride<int64_t, _1>;
     using ShapeDescale = cute::Shape<int32_t, int32_t>;
     using StrideDescale = cute::Stride<int64_t, int64_t>;
-    using PrefetchKScaleShape = cute::Shape<_2>;
+    using PrefetchKScaleShape = cute::Shape<std::conditional<Scaling_Recipe_ == ScalingRecipe::PerQKVToken, _2, _0>>;
 
     using TMA_Q = decltype(make_tma_copy_A_sm90(
         GmemTiledCopyQ{},
@@ -322,7 +325,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<SmemLayoutKPerTokenScale>> smem_k_per_token_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
         SmemQv_t smem_qv;
     };
 
@@ -331,7 +334,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<SmemLayoutKPerTokenScale>> smem_k_per_token_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemP_t smem_p;
     };
@@ -340,7 +343,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<SmemLayoutKPerTokenScale>> smem_k_per_token_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemP_t smem_p;
         SmemScale_t smem_scale;
@@ -361,7 +364,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<SmemLayoutKPerTokenScale>> smem_k_per_token_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemScale_t smem_scale;
     };
@@ -787,21 +790,36 @@ struct CollectiveMainloopFwdSm90 {
             }
         }();
 
-        auto [tKgK_per_token_scale, tKsK_per_token_scale] = [&] {
+        auto [tKgK_per_token_scale, tKsK_per_scale] = [&] {
             if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQKVToken) {
-                Tensor sK_per_token_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_per_token_scale.data()), SmemLayoutKPerTokenScale{});
+                Tensor sK_per_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerTokenScale{});
                 Tensor mK_per_token_scale = params.tma_load_K_per_token_scale.get_tma_tensor(params.shape_k_descale)(_, bidh);
                 Tensor gK_per_token_scale = local_tile(
                     domain_offset(make_coord(is_varlen_k ? seqlen_info.offset_k : bidb * seqlen_info.seqlen_k), mK_per_token_scale), 
                     make_shape(select<1>(TileShape_MNK{})), make_coord(_));  // (N)
                 auto block_tma_K_per_token_scale = params.tma_load_K_per_token_scale.get_slice(cluster_local_block_id.x);
                 Tensor tKgK_per_token_scale = group_modes<0, 2>(block_tma_K_per_token_scale.partition_S(gK_per_token_scale));  // (TMA, K)
-                Tensor tKsK_per_token_scale = group_modes<0, 2>(block_tma_K_per_token_scale.partition_D(sK_per_token_scale));  // (TMA, pipe)
-                return cute::make_tuple(tKgK_per_token_scale, tKsK_per_token_scale);
+                Tensor tKsK_per_scale = group_modes<0, 2>(block_tma_K_per_token_scale.partition_D(sK_per_scale));  // (TMA, pipe)
+                return cute::make_tuple(tKgK_per_token_scale, tKsK_per_scale);
             } else {
                 return cute::make_tuple(nullptr, nullptr);
             }
         }();
+
+        TiledCopy scale_copy_k_per_block = make_tiled_copy(SmemLayoutKPerBlockScaleCopyAtomB{}, Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
+        auto [tKgK_per_block_scale, tKsK_per_block_scale] = [&] {
+            if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                ThrCopy thr_scale_copy_k = scale_copy_k_per_block.get_slice(threadIdx.x);
+                Tensor mK_per_block_scale = make_tensor(make_gmem_ptr(params.ptr_k_descale), params.shape_k_descale, params.stride_k_descale)(_, bidh);
+                Tensor gK_per_block_scale = local_tile(
+                    domain_offset(make_coord(is_varlen_k ? seqlen_info.offset_k : bidb * seqlen_info.seqlen_k), mK_per_block_scale), 
+                    make_shape(select<1>(TileShape_MNK{})), make_coord(_));  // (N)
+                Tensor tKgK_per_block_scale = thr_scale_copy_k.partition_S(gK_per_block_scale);
+
+                Tensor sK_per_block_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerBlockScale{});
+                Tensor tKsK_per_block_scale = thr_scale_copy_k.partition_D(sK_per_block_scale);
+            }
+        }
 
         using PagedKVManager_t = PagedKVManager<get<1>(TileShape_MNK{}), get<2>(TileShape_MNK{}), get<1>(TileShape_MNK_PV{}), NumProducerThreads, Element, Transpose_V || !IntraWGOverlap /*KV_Same_Iter*/>;
         PagedKVManager_t paged_kv_manager(
@@ -914,12 +932,14 @@ struct CollectiveMainloopFwdSm90 {
             if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
             // if (thread_idx == 0) { printf("Producer: main load, before load_K, index = %d\n", smem_pipe_write.index());}
             load_K(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/);
-            if constexpr (!PagedKV) {
-                if constexpr (Transpose_V && kScalingRecipe == ScalingRecipe::PerQKVToken) {
+            if constexpr (!PagedKV && Is_FP8 && Transpose_V) {
+                if constexpr (kScalingRecipe == ScalingRecipe::PerQKVToken) {
                     // CUTE_LOG("%s, n_block: %d\n", "Before loading K per token scale.", n_block);
                     copy(params.tma_load_K_per_token_scale.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                        tKgK_per_token_scale(_, n_block), tKsK_per_token_scale(_, smem_pipe_write.index()));
+                        tKgK_per_token_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                     // CUTE_LOG("%s, n_block: %d\n", "After loading K per token scale.", n_block);
+                } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                    copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                 }
             }
  
@@ -1008,12 +1028,14 @@ struct CollectiveMainloopFwdSm90 {
                 }
                 if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/); }
                 load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/);
-                if constexpr (!PagedKV) {
-                    if constexpr (Transpose_V && kScalingRecipe == ScalingRecipe::PerQKVToken) {
+                if constexpr (!PagedKV && Is_FP8 && Transpose_V) {
+                    if constexpr (kScalingRecipe == ScalingRecipe::PerQKVToken) {
                         // CUTE_LOG("%s, n_block: %d\n", "Before loading K per token scale.", n_block);
                         copy(params.tma_load_K_per_token_scale.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
-                            tKgK_per_token_scale(_, n_block), tKsK_per_token_scale(_, smem_pipe_write.index()));
+                            tKgK_per_token_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                         // CUTE_LOG("%s, n_block: %d\n", "After loading K per token scale.", n_block);
+                    } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                        copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                     }
                 }
                 if constexpr (!Transpose_V) {
@@ -1157,7 +1179,7 @@ struct CollectiveMainloopFwdSm90 {
         Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
         Tensor sQ_per_token_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q_per_token_scale.data()), SmemLayoutQPerTokenScale{});
         Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
-        Tensor sK_per_token_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_per_token_scale.data()), SmemLayoutKPerTokenScale{});
+        Tensor sK_per_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerTokenScale{});
         Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVtMma{});
         Tensor sP = [&] {
             if constexpr (MmaPV_is_RS) {
@@ -1251,38 +1273,51 @@ struct CollectiveMainloopFwdSm90 {
         // -inf to e.g. -50.0, which can affect the attention softmax.
         auto scoremod_premask_fn = [&](auto& tSrS, auto& tQscale_row, auto& tKscale_col, int stage) {
             if constexpr (Has_softcap) { flash::apply_softcap(tSrS, softcap_val); }
-            if constexpr (Transpose_V && kScalingRecipe == ScalingRecipe::PerQKVToken) {
-                auto thread_mma = TiledMmaQK{}.get_thread_slice(thread_idx);
-                auto thread0_mma = TiledMmaQK{}.get_thread_slice(_0{});
-        
-                static constexpr int Row = 0, Col = 1;
-        
+
+            auto thread_mma = TiledMmaQK{}.get_thread_slice(thread_idx);
+            auto thread0_mma = TiledMmaQK{}.get_thread_slice(_0{});
+            
+            static constexpr int Row = 0, Col = 1;
+            
+            if constexpr (Is_FP8) {
                 Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/false>(tSrS.layout()));
                 Tensor cS = cute::make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{});
                 Tensor tScS = thread_mma.partition_C(cS);
                 Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/false>(tScS.layout()));
 
-                #pragma unroll
-                for (int n = 0; n < size(tKscale_col); ++n) {
-                    float k_descale = tKscale_col(n);
+                if constexpr (kScalingRecipe == ScalingRecipe::PerQKVToken) {
                     #pragma unroll
-                    for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
-                        float q_descale = tQscale_row(m);
-                        tSrS_rowcol(m, n) *= k_descale * q_descale;
+                    for (int n = 0; n < size(tKscale_col); ++n) {
+                        float k_descale = tKscale_col(n);
+                        #pragma unroll
+                        for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
+                            float q_descale = tQscale_row(m);
+                            tSrS_rowcol(m, n) *= k_descale * q_descale;
+                        }
                     }
-                }
- 
-                #pragma unroll
-                for (int n = size(tKscale_col); n < size<Col>(tSrS_rowcol); ++n) {
-                    int const col_idx = get<1>(tScS_rowcol(_0{}, n));
-                    float k_descale = sK_per_token_scale(col_idx, stage);
-                    // float k_descale = 1.1;
-                    // float k_descale = tKscale_col(n);
                     #pragma unroll
-                    for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
-                        float q_descale = tQscale_row(m);
-                        // float q_descale = 0.8;
-                        tSrS_rowcol(m, n) *= k_descale * q_descale;
+                    for (int n = size(tKscale_col); n < size<Col>(tSrS_rowcol); ++n) {
+                        int const col_idx = get<1>(tScS_rowcol(_0{}, n));
+                        float k_descale = sK_per_scale(col_idx, stage);
+                        // float k_descale = 1.1;
+                        // float k_descale = tKscale_col(n);
+                        #pragma unroll
+                        for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
+                            float q_descale = tQscale_row(m);
+                            // float q_descale = 0.8;
+                            tSrS_rowcol(m, n) *= k_descale * q_descale;
+                        }
+                    }
+                } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                    #pragma unroll
+                    for (int n = 0; n < size<Col>(tSrS_rowcol); ++n) {
+                        float k_descale = sK_per_scale(_0{}, stage);
+                        #pragma unroll
+                        for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
+                            float q_descale = tQscale_row(m);
+                            // float q_descale = 0.8;
+                            tSrS_rowcol(m, n) *= k_descale * q_descale;
+                        }
                     }
                 }
             }
@@ -1360,10 +1395,12 @@ struct CollectiveMainloopFwdSm90 {
                 tQscale_row(row_idx) = sQ_per_token_scale(row_idx);
             }
             Tensor tKscale_col = make_tensor<float>(PrefetchKScaleShape{});
-            #pragma unroll
-            for (int n = 0; n < size(tKscale_col); ++n) {
-                int const col_idx = get<1>(tScS_rowcol(_0{}, n));
-                tKscale_col(col_idx) = sK_per_token_scale(col_idx);
+            if constexpr (kScalingRecipe == ScalingRecipe::PerQKVToken) {
+                #pragma unroll
+                for (int n = 0; n < size(tKscale_col); ++n) {
+                    int const col_idx = get<1>(tScS_rowcol(_0{}, n));
+                    tKscale_col(col_idx) = sK_per_scale(col_idx);
+                }
             }
 
             warpgroup_wait<0>();
@@ -1427,10 +1464,12 @@ struct CollectiveMainloopFwdSm90 {
                 Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/false>(tScS.layout()));
 
                 Tensor tKscale_col = make_tensor<float>(PrefetchKScaleShape{});
-                #pragma unroll
-                for (int n = 0; n < size(tKscale_col); ++n) {
-                    int const col_idx = get<1>(tScS_rowcol(_0{}, n));
-                    tKscale_col(col_idx) = sK_per_token_scale(col_idx);
+                if constexpr (kScalingRecipe == ScalingRecipe::PerQKVToken) {
+                    #pragma unroll
+                    for (int n = 0; n < size(tKscale_col); ++n) {
+                        int const col_idx = get<1>(tScS_rowcol(_0{}, n));
+                        tKscale_col(col_idx) = sK_per_scale(col_idx);
+                    }
                 }
 
                 warpgroup_wait<1>();
@@ -1538,7 +1577,7 @@ struct CollectiveMainloopFwdSm90 {
                 warpgroup_wait<0>();
                 pipeline_k.consumer_release(smem_pipe_read);  // release K
                 Tensor tQscale_row = make_tensor<float>(make_shape(get<0, 1>(tSrS), get<1>(tSrS)));
-                Tensor tKscale_col = make_tensor<float>(Shape<_8>{});
+                Tensor tKscale_col = make_tensor<float>(Shape<PrefetchKScaleShape>{});
                 scoremod_premask_fn(tSrS, tQscale_row, tKscale_col, smem_pipe_read.index());
                 mask_fn(tSrS, n_block);
                 Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS);

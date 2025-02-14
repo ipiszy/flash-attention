@@ -286,16 +286,18 @@ for causal in causal_vals:
             # out = torch.empty_like(q)
             q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
             softmax_scale = q.shape[-1] ** (-0.5)
-            q_descale = (
-                torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
-                if scaling_recipe == 0
-                else torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
-            )
-            k_descale = (
-                torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
-                if scaling_recipe == 0
-                else torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
-            )
+            if scaling_recipe == 0:
+                q_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
+                k_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
+            elif scaling_recipe == 1:
+                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
+                k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
+            elif scaling_recipe == 2:
+                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128)] * nheads, dtype=torch.float32, device='cuda').T
+                k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256)] * nheads, dtype=torch.float32, device='cuda').T
+            else:
+                raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
+
             v_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
             print(f"{q_descale.shape=}, {q_descale.stride()=}, {k_descale.shape=}, {k_descale.stride()=}", flush=True)
 
