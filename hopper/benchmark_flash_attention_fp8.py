@@ -293,7 +293,7 @@ for causal in causal_vals:
                 q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
                 k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
             elif scaling_recipe == 2:
-                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128)] * nheads, dtype=torch.float32, device='cuda').T
+                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
                 k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256)] * nheads, dtype=torch.float32, device='cuda').T
             else:
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")

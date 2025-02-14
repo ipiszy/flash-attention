@@ -244,7 +244,7 @@ struct CollectiveMainloopFwdSm90 {
     using StrideRotary = cute::Stride<int64_t, _1>;
     using ShapeDescale = cute::Shape<int32_t, int32_t>;
     using StrideDescale = cute::Stride<int64_t, int64_t>;
-    using PrefetchKScaleShape = cute::Shape<std::conditional<Scaling_Recipe_ == ScalingRecipe::PerQKVToken, _2, _0>>;
+    using PrefetchKScaleShape = cute::Shape<std::conditional_t<Scaling_Recipe_ == ScalingRecipe::PerQKVToken, _2, _0>>;
 
     using TMA_Q = decltype(make_tma_copy_A_sm90(
         GmemTiledCopyQ{},
@@ -325,7 +325,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>>> smem_k_scale;
         SmemQv_t smem_qv;
     };
 
@@ -334,7 +334,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemP_t smem_p;
     };
@@ -343,7 +343,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemP_t smem_p;
         SmemScale_t smem_scale;
@@ -364,7 +364,7 @@ struct CollectiveMainloopFwdSm90 {
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutQ>, SmemAlignmentQ> smem_q;
         cute::array_aligned<Element, cute::cosize_v<SmemLayoutK>, SmemAlignmentK> smem_k;
         cute::array_aligned<float, cute::cosize_v<SmemLayoutQPerTokenScale>> smem_q_per_token_scale;
-        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>> smem_k_scale;
+        cute::array_aligned<float, cute::cosize_v<std::conditional_t<kScalingRecipe == ScalingRecipe::PerQKVToken, SmemLayoutKPerTokenScale, SmemLayoutKPerBlockScale>>> smem_k_scale;
         SmemQv_t smem_qv;
         SmemScale_t smem_scale;
     };
@@ -779,7 +779,7 @@ struct CollectiveMainloopFwdSm90 {
                 Tensor mQ_per_token_scale = params.tma_load_Q_per_token_scale.get_tma_tensor(params.shape_q_descale)(_, bidh);
                 auto offset_q_token_scale = domain_offset(make_coord(is_varlen_q ? seqlen_info.offset_q : bidb * seqlen_info.seqlen_q), mQ_per_token_scale);
                 Tensor gQ_per_token_scale = local_tile(
-                    domain_offset(make_coord(is_varlen_q ? seqlen_info.offset_q : bidb * seqlen_info.seqlen_q), mQ_per_token_scale), 
+                    domain_offset(make_coord(is_varlen_q ? (params.cu_seqlens_q[bidb] + bidb * 128) / 128 * 128 : bidb * seqlen_info.seqlen_q), mQ_per_token_scale), 
                     make_shape(select<0>(TileShape_MNK{})), make_coord(m_block));  // (M)
                 auto block_tma_Q_per_token_scale = params.tma_load_Q_per_token_scale.get_slice(_0{});
                 Tensor tQgQ_per_token_scale = group_modes<0, 2>(block_tma_Q_per_token_scale.partition_S(gQ_per_token_scale));  // (TMA, K)
@@ -792,10 +792,10 @@ struct CollectiveMainloopFwdSm90 {
 
         auto [tKgK_per_token_scale, tKsK_per_scale] = [&] {
             if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQKVToken) {
-                Tensor sK_per_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerTokenScale{});
+                Tensor sK_per_token_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerTokenScale{});
                 Tensor mK_per_token_scale = params.tma_load_K_per_token_scale.get_tma_tensor(params.shape_k_descale)(_, bidh);
                 Tensor gK_per_token_scale = local_tile(
-                    domain_offset(make_coord(is_varlen_k ? seqlen_info.offset_k : bidb * seqlen_info.seqlen_k), mK_per_token_scale), 
+                    domain_offset(make_coord(is_varlen_k ? (params.cu_seqlens_q[bidb] + bidb * 256) / 256 * 256 : bidb * seqlen_info.seqlen_k), mK_per_token_scale), 
                     make_shape(select<1>(TileShape_MNK{})), make_coord(_));  // (N)
                 auto block_tma_K_per_token_scale = params.tma_load_K_per_token_scale.get_slice(cluster_local_block_id.x);
                 Tensor tKgK_per_token_scale = group_modes<0, 2>(block_tma_K_per_token_scale.partition_S(gK_per_token_scale));  // (TMA, K)
@@ -806,20 +806,23 @@ struct CollectiveMainloopFwdSm90 {
             }
         }();
 
-        TiledCopy scale_copy_k_per_block = make_tiled_copy(SmemLayoutKPerBlockScaleCopyAtomB{}, Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
+        TiledCopy scale_copy_k_per_block = make_tiled_copy(SmemLayoutKPerBlockScaleCopyAtom{}, Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
         auto [tKgK_per_block_scale, tKsK_per_block_scale] = [&] {
             if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
                 ThrCopy thr_scale_copy_k = scale_copy_k_per_block.get_slice(threadIdx.x);
                 Tensor mK_per_block_scale = make_tensor(make_gmem_ptr(params.ptr_k_descale), params.shape_k_descale, params.stride_k_descale)(_, bidh);
                 Tensor gK_per_block_scale = local_tile(
-                    domain_offset(make_coord(is_varlen_k ? seqlen_info.offset_k : bidb * seqlen_info.seqlen_k), mK_per_block_scale), 
-                    make_shape(select<1>(TileShape_MNK{})), make_coord(_));  // (N)
-                Tensor tKgK_per_block_scale = thr_scale_copy_k.partition_S(gK_per_block_scale);
+                    domain_offset(make_coord(is_varlen_k ? (params.cu_seqlens_q[bidb] + bidb * 256) / 256 : bidb * seqlen_info.seqlen_k), mK_per_block_scale), 
+                    make_shape(_1{}), make_coord(_));  // ((ATOM), ATOM_NUM)
+                Tensor tKgK_per_block_scale = group_modes<0, 2>(thr_scale_copy_k.partition_S(gK_per_block_scale));
 
                 Tensor sK_per_block_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k_scale.data()), SmemLayoutKPerBlockScale{});
                 Tensor tKsK_per_block_scale = thr_scale_copy_k.partition_D(sK_per_block_scale);
+                return cute::make_tuple(tKgK_per_block_scale, tKsK_per_block_scale);
+            } else {
+                return cute::make_tuple(nullptr, nullptr);
             }
-        }
+        }();
 
         using PagedKVManager_t = PagedKVManager<get<1>(TileShape_MNK{}), get<2>(TileShape_MNK{}), get<1>(TileShape_MNK_PV{}), NumProducerThreads, Element, Transpose_V || !IntraWGOverlap /*KV_Same_Iter*/>;
         PagedKVManager_t paged_kv_manager(
@@ -939,7 +942,7 @@ struct CollectiveMainloopFwdSm90 {
                         tKgK_per_token_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                     // CUTE_LOG("%s, n_block: %d\n", "After loading K per token scale.", n_block);
                 } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
+                    copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
                 }
             }
  
@@ -1035,7 +1038,7 @@ struct CollectiveMainloopFwdSm90 {
                             tKgK_per_token_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
                         // CUTE_LOG("%s, n_block: %d\n", "After loading K per token scale.", n_block);
                     } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                        copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_scale(_, smem_pipe_write.index()));
+                        copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
                     }
                 }
                 if constexpr (!Transpose_V) {

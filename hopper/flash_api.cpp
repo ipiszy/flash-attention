@@ -870,14 +870,9 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                     params.q_descale_head_stride = q_descale.stride(1);
                     break;
                 case ScalingRecipe::PerQKVToken:
+                case ScalingRecipe::PerQTokenKVBlock:
                     // Per-token scaling
                     CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128 * 128, num_heads);
-                    params.q_descale_len = q_descale.size(0);
-                    params.q_descale_head_stride = q_descale.stride(1);
-                    break;
-                case ScalingRecipe::PerQTokenKVBlock:
-                    // Per-block scaling
-                    CHECK_SHAPE(q_descale,(total_q + batch_size * 128) / 128, num_heads);
                     params.q_descale_len = q_descale.size(0);
                     params.q_descale_head_stride = q_descale.stride(1);
                     break;
