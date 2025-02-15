@@ -209,6 +209,7 @@ def attention_ref(
     upcast=True,
     reorder_ops=False,
     intermediate_dtype=None,
+    scaling_recipe=0,
 ):
     """
     Arguments:
@@ -237,12 +238,32 @@ def attention_ref(
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
         qv = qv.float() if qv is not None else None
+    # tmp = torch.einsum("bthd,bshd->bhts", q, repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2]))
+    # for b in range(tmp.shape[0]):
+    #     for h in range(tmp.shape[1]):
+    #         for row in range(tmp.shape[2]):
+    #             for col in range(tmp.shape[3]):
+    #                 print(f"tmp0[{b}][{h}][{row}][{col}] = {tmp[b][h][row][col]}")
+
     if q_descale is not None:
-        q_descale = repeat(q_descale, "b h -> b 1 (h g) 1", g = q.shape[2] // k.shape[2]).to(dtype=q.dtype)
-        q = q.float() * q_descale
-        qv = qv.float() * q_descale if qv is not None else None
+        print(f"before, {q_descale = }")
+        if scaling_recipe == 0:
+            q_descale = repeat(q_descale, "b h -> b 1 (h g) 1", g = q.shape[2] // k.shape[2])
+        elif scaling_recipe == 2:
+            q_descale = q_descale.reshape(q.shape[0], q.shape[1], q_descale.shape[-1], 1)
+        else:
+            raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
+        print(f"after, {q_descale = }")
+        q = (q.float() * q_descale).to(dtype=q.dtype)
+        qv = (qv.float() * q_descale).to(dtype=qv.dtype) if qv is not None else None
     if k_descale is not None:
-        k = (k.float() * rearrange(k_descale, "b h -> b 1 h 1")).to(dtype=k.dtype)
+        if scaling_recipe == 0:
+            k = (k.float() * rearrange(k_descale, "b h -> b 1 h 1")).to(dtype=k.dtype)
+        elif scaling_recipe == 2:
+            print(f"{k_descale = }")
+            k = (k.float() * k_descale).to(dtype=k.dtype)
+        else:
+            raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
     if v_descale is not None:
         v = (v.float() * rearrange(v_descale, "b h -> b 1 h 1")).to(dtype=v.dtype)
     seqlen_q, seqlen_k = q.shape[1], k.shape[1]
@@ -251,6 +272,14 @@ def attention_ref(
     d = q.shape[-1]
     dv = v.shape[-1]
     softmax_scale = 1.0 / math.sqrt(d if qv is None else d + dv)
+
+    # tmp = torch.einsum("bthd,bshd->bhts", q, k)
+    # for b in range(tmp.shape[0]):
+    #     for h in range(tmp.shape[1]):
+    #         for row in range(tmp.shape[2]):
+    #             for col in range(tmp.shape[3]):
+    #                 print(f"tmp1[{b}][{h}][{row}][{col}] = {tmp[b][h][row][col]}")
+
     if not reorder_ops:
         scores = torch.einsum("bthd,bshd->bhts", q * softmax_scale, k)
     else:

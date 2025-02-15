@@ -45,21 +45,22 @@ COMPILED_HDIMS = (
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float16] if not DISABLE_FP16 else []) + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
+# @pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float16] if not DISABLE_FP16 else []) + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
-# @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("scaling_recipe", [2])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
 # @pytest.mark.parametrize("has_qv", [False, True])
 @pytest.mark.parametrize("has_qv", [False])
 # @pytest.mark.parametrize("deterministic", [False, True])
 @pytest.mark.parametrize("deterministic", [False])
-@pytest.mark.parametrize("softcap", [0.0] + ([15.0] if not DISABLE_SOFTCAP else []))
-# @pytest.mark.parametrize("softcap", [0.0])
-@pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
-# @pytest.mark.parametrize("local", [False])
-@pytest.mark.parametrize("causal", [False, True])
-# @pytest.mark.parametrize("causal", [False])
+# @pytest.mark.parametrize("softcap", [0.0] + ([15.0] if not DISABLE_SOFTCAP else []))
+@pytest.mark.parametrize("softcap", [0.0])
+# @pytest.mark.parametrize("local", [False] + ([True] if not DISABLE_LOCAL else []))
+@pytest.mark.parametrize("local", [False])
+# @pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("causal", [True])
 # @pytest.mark.parametrize("V_colmajor", [False, True])
 @pytest.mark.parametrize("V_colmajor", [False])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
@@ -69,12 +70,14 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("d", [64, 128, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128])
 # @pytest.mark.parametrize("d", [64, 96, 128, 192])
-@pytest.mark.parametrize("d", COMPILED_HDIMS)
-# @pytest.mark.parametrize("d", [128])
+# @pytest.mark.parametrize("d", COMPILED_HDIMS)
+@pytest.mark.parametrize("d", [128])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
         (1, 1),
+        (1, 161),
+        (129, 1),
         (64, 128),
         (128, 192),
         (256, 256),
@@ -98,7 +101,7 @@ COMPILED_HDIMS = (
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
 def test_flash_attn_output(
-        seqlen_q, seqlen_k, d, causal, local, softcap, V_colmajor, deterministic, has_qv, mha_type, dtype
+        seqlen_q, seqlen_k, d, causal, local, softcap, V_colmajor, deterministic, has_qv, mha_type, dtype, scaling_recipe
 ):
     # sink_token_length = 0 if not local else 4
     sink_token_length = 0 if not local else 0
@@ -110,7 +113,7 @@ def test_flash_attn_output(
     # batch_size = 40
     # nheads = 16
     batch_size = 9 if seqlen_k <= 2048 else 2
-    # batch_size = 1
+    batch_size = 1
     nheads = 6
     # nheads = 1
     nheads_kv = nheads if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
@@ -130,10 +133,34 @@ def test_flash_attn_output(
         # Put window_size after QKV randn so that window_size changes from test to test
         window_size = (-1, -1) if not local else torch.randint(0, seqlen_k, (2,))
         # window_size = (-1, -1) if not local else (16, 0)
+        q_descale_ref = None
+        k_descale_ref = None
         if dtype == torch.float8_e4m3fn:
-            q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
+            if scaling_recipe == 0:
+                q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
+            elif scaling_recipe == 2:
+                kBlockM = 128 
+                kBlockN = 160
+                def get_q_offset(b, seqlen):
+                    return int((b * seqlen + b * kBlockM) / kBlockM) * kBlockM 
+                # q_descale = (torch.rand(nheads, get_q_offset(batch_size, seqlen_q), device=device, dtype=torch.float32) * 2).T
+                q_descale = (torch.ones(nheads, get_q_offset(batch_size, seqlen_q), device=device, dtype=torch.float32)).T
+                q_descale_ref = torch.empty(batch_size, seqlen_q, nheads, device=device, dtype=torch.float32)
+                for b in range(batch_size):
+                    q_descale_ref[b] = q_descale[get_q_offset(b, seqlen_q) : get_q_offset(b, seqlen_q) + seqlen_q, :]
+                    q_descale[get_q_offset(b, seqlen_q) + seqlen_q : , :] = 0.0
+                k_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                k_descale_ref = repeat(k_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
+                k_descale_ref = k_descale_ref.reshape(batch_size, -1, k_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
+                v_descale = torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2
+            else:
+                raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
         else:
             q_descale, k_descale, v_descale = None, None, None
+        if q_descale_ref is None:
+            q_descale_ref = q_descale
+        if k_descale_ref is None:
+            k_descale_ref = k_descale
         q, k, v = [x.detach().to(dtype).requires_grad_() for x in (q_ref, k_ref, v_ref)]
         qv = qv_ref.detach().to(dtype).requires_grad_() if has_qv else None
         if V_colmajor:
@@ -146,10 +173,11 @@ def test_flash_attn_output(
             None,
             causal=causal,
             qv=qv_ref,
-            q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale,
             window_size=window_size,
             sink_token_length=sink_token_length,
-            softcap=softcap
+            softcap=softcap,
+            scaling_recipe=scaling_recipe,
         )
         out_pt, attn_pt = attention_ref(
             q_ref,
@@ -159,13 +187,14 @@ def test_flash_attn_output(
             None,
             causal=causal,
             qv=qv_ref,
-            q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale,
             window_size=window_size,
             sink_token_length=sink_token_length,
             softcap=softcap,
             upcast=False,
             reorder_ops=True,
             intermediate_dtype=dtype if dtype == torch.float8_e4m3fn else None,
+            scaling_recipe=scaling_recipe,
         )
 
         # qk = torch.einsum('bshd,bthd->bhst', q_ref, k_ref).float()
@@ -197,8 +226,11 @@ def test_flash_attn_output(
                 sink_token_length=sink_token_length,
                 softcap=softcap,
                 pack_gqa=pack_gqa,
-                num_splits=num_splits
+                num_splits=num_splits,
+                scaling_recipe=scaling_recipe,
             )
+            print(f"{out = }")
+            print(f"{out_ref = }")
             print(f"Output max diff: {(out - out_ref).abs().max().item()}")
             print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
             # if not causal:

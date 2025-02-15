@@ -252,7 +252,7 @@ class FlashAttnFunc(torch.autograd.Function):
         pack_gqa=None,
         deterministic=False,
         sm_margin=0,
-        use_per_token_scale=False,
+        scaling_recipe=0,
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
@@ -499,6 +499,7 @@ def flash_attn_func(
     pack_gqa=None,
     deterministic=False,
     sm_margin=0,
+    scaling_recipe=0,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
@@ -560,6 +561,7 @@ def flash_attn_func(
         pack_gqa,
         deterministic,
         sm_margin,
+        scaling_recipe,
     )
 
 
@@ -584,6 +586,7 @@ def flash_attn_varlen_func(
     pack_gqa=None,
     deterministic=False,
     sm_margin=0,
+    scaling_recipe=0,
 ):
     return FlashAttnVarlenFunc.apply(
         q,
@@ -606,6 +609,7 @@ def flash_attn_varlen_func(
         pack_gqa,
         deterministic,
         sm_margin,
+        scaling_recipe,
     )
 
 

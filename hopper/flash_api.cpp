@@ -888,7 +888,6 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
             CHECK_DEVICE(k_descale);
             switch (scaling_recipe) {
                 case ScalingRecipe::PerKVHead:
-                    // TODO:
                     // Per-K head scaling.
                     CHECK_SHAPE(k_descale, batch_size, num_heads_k);
                     params.k_descale_batch_stride = k_descale.stride(0);
@@ -896,12 +895,12 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
                     break;
                 case ScalingRecipe::PerQKVToken:
                     // Per-token scaling
-                    CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256 * 256, num_heads);
+                    TORCH_CHECK(k_descale.size(1) == num_heads_k, "k_descale shape[-1] must be equal to num_heads_k, but got ", k_descale.size(1), " and ", num_heads_k);
                     params.k_descale_len = k_descale.size(0);
                     params.k_descale_head_stride = k_descale.stride(1);
                     break;
                 case ScalingRecipe::PerQTokenKVBlock:
-                    CHECK_SHAPE(k_descale, (total_k + batch_size * 256) / 256, num_heads);
+                    TORCH_CHECK(k_descale.size(1) == num_heads_k, "k_descale shape[-1] must be equal to num_heads_k, but got ", k_descale.size(1), " and ", num_heads_k);
                     params.k_descale_len = k_descale.size(0);
                     params.k_descale_head_stride = k_descale.stride(1);
                     break;

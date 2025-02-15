@@ -234,7 +234,7 @@ dim = 2048
 # dim = 256
 dropout_p = 0.0
 
-scaling_recipe = 1
+scaling_recipe = 2
 
 methods = (["Pytorch", "Flash3"]
         + (["cuDNN"] if cudnn is not None else [])
@@ -290,11 +290,11 @@ for causal in causal_vals:
                 q_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
                 k_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
             elif scaling_recipe == 1:
-                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
-                k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256) * 256] * nheads, dtype=torch.float32, device='cuda').T
+                q_descale = torch.tensor([[1.0] * int((seqlen * batch_size + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
+                k_descale = torch.tensor([[1.0] * int((seqlen + 255) / 256) * 256 * batch_size] * nheads, dtype=torch.float32, device='cuda').T
             elif scaling_recipe == 2:
-                q_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
-                k_descale = torch.tensor([[1.0] * int((seqlen + batch_size * 256) / 256)] * nheads, dtype=torch.float32, device='cuda').T
+                q_descale = torch.tensor([[1.0] * int((seqlen * batch_size + batch_size * 128) / 128) * 128] * nheads, dtype=torch.float32, device='cuda').T
+                k_descale = torch.tensor([[1.0] * int((seqlen + 255) / 256) * batch_size] * nheads, dtype=torch.float32, device='cuda').T
             else:
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
 

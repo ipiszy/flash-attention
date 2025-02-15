@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <c10/util/Exception.h>
+
 #include "cute/tensor.hpp"
 
 #include "cutlass/cutlass.h"
@@ -82,6 +84,16 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     int seqlen_q = !is_varlen_q ? params.seqlen_q : params.total_q;
     int batch_q = !is_varlen_q ? params.b : 1;
     int batch_k = !is_varlen_k ? (params.kv_batch_idx ? params.b_k : params.b) : 1;
+
+    if constexpr (Scaling_Recipe == ScalingRecipe::PerQTokenKVBlock) {
+        TORCH_CHECK(
+            params.k_descale_len == (params.seqlen_k + kBlockN - 1) / kBlockN * (params.kv_batch_idx ? params.b_k : params.b), 
+            "kBlockN: ", std::to_string(kBlockN), 
+            ", params.k_descale_len: ", std::to_string(params.k_descale_len), 
+            ", params.seqlen_k: ", std::to_string(params.seqlen_k),
+            ", batch_size_k: ", std::to_string(params.kv_batch_idx ? params.b_k : params.b));
+    }
+ 
     typename CollectiveMainloop::StrideV v_strides =
         cute::conditional_return<!V_colmajor>(
             make_stride(params.v_row_stride, _1{}, params.v_head_stride, !is_varlen_k ? params.v_batch_stride : 0),
