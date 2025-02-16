@@ -244,7 +244,7 @@ struct CollectiveMainloopFwdSm90 {
     using StrideRotary = cute::Stride<int64_t, _1>;
     using ShapeDescale = cute::Shape<int32_t, int32_t>;
     using StrideDescale = cute::Stride<int64_t, int64_t>;
-    using PrefetchKScaleShape = cute::Shape<std::conditional_t<Scaling_Recipe_ == ScalingRecipe::PerQKVToken, _2, _0>>;
+    using PrefetchKScaleShape = cute::Shape<std::conditional_t<Scaling_Recipe_ == ScalingRecipe::PerQKVToken, _2, _2>>;
 
     using TMA_Q = decltype(make_tma_copy_A_sm90(
         GmemTiledCopyQ{},
@@ -1339,33 +1339,39 @@ struct CollectiveMainloopFwdSm90 {
                         }
                     }
                 } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    float k_descale = sK_per_scale(stage);
-                    // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
-                    //     CUTE_LOG("k_descale(%d): %f\n", stage, k_descale);
-                    // }
-
+                    float ratio = tKscale_col(1) / tKscale_col(0);
                     #pragma unroll
                     for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
-                        float q_descale = tQscale_row(m);
-                        // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
-                        //     CUTE_LOG("q_descale(%d): %f\n", m, q_descale);
-                        // }
+                        tQscale_row(m) *= ratio;
                     }
 
-                    #pragma unroll
-                    for (int n = 0; n < size<Col>(tSrS_rowcol); ++n) {
-                        #pragma unroll
-                        for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
-                            float q_descale = tQscale_row(m);
-                            // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
-                            //     CUTE_LOG("before, tSrS_rowcol(%d, %d): %f\n", get<0>(tScS_rowcol(m, n)) + m_block * kBlockM, get<1>(tScS_rowcol(m, n)) + n_block * kBlockN, tSrS_rowcol(m, n));
-                            // }
-                            tSrS_rowcol(m, n) *= k_descale * q_descale;
-                            // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
-                            //     CUTE_LOG("after, tSrS_rowcol(%d, %d): %f\n", get<0>(tScS_rowcol(m, n)) + m_block * kBlockM, get<1>(tScS_rowcol(m, n)) + n_block * kBlockN, tSrS_rowcol(m, n));
-                            // }
-                        }
-                    }
+                    // float k_descale = sK_per_scale(stage);
+                    // // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
+                    // //     CUTE_LOG("k_descale(%d): %f\n", stage, k_descale);
+                    // // }
+
+                    // #pragma unroll
+                    // for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
+                    //     float q_descale = tQscale_row(m);
+                    //     // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
+                    //     //     CUTE_LOG("q_descale(%d): %f\n", m, q_descale);
+                    //     // }
+                    // }
+
+                    // #pragma unroll
+                    // for (int n = 0; n < size<Col>(tSrS_rowcol); ++n) {
+                    //     #pragma unroll
+                    //     for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
+                    //         float q_descale = tQscale_row(m);
+                    //         // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
+                    //         //     CUTE_LOG("before, tSrS_rowcol(%d, %d): %f\n", get<0>(tScS_rowcol(m, n)) + m_block * kBlockM, get<1>(tScS_rowcol(m, n)) + n_block * kBlockN, tSrS_rowcol(m, n));
+                    //         // }
+                    //         tSrS_rowcol(m, n) *= k_descale * q_descale;
+                    //         // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0) {
+                    //         //     CUTE_LOG("after, tSrS_rowcol(%d, %d): %f\n", get<0>(tScS_rowcol(m, n)) + m_block * kBlockM, get<1>(tScS_rowcol(m, n)) + n_block * kBlockN, tSrS_rowcol(m, n));
+                    //         // }
+                    //     }
+                    // }
                 }
             }
         };
@@ -1450,6 +1456,9 @@ struct CollectiveMainloopFwdSm90 {
                             int const col_idx = get<1>(tScS_rowcol(_0{}, n));
                             tKscale_col(n) = sK_per_scale(col_idx, smem_pipe_read.index());
                         }
+                    } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                        tKscale_col(0) = 1.0f;
+                        tKscale_col(1) = sK_per_scale(smem_pipe_read.index());
                     }
                     return cute::make_tuple(tQscale_row, tKscale_col);
                 } else {
@@ -1469,10 +1478,10 @@ struct CollectiveMainloopFwdSm90 {
             scoremod_premask_fn(tSrS, tQscale_row, tKscale_col, smem_pipe_read.index(), m_block, n_block);
             mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block);
 
-            Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS, tQscale_row);
             // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
 
-            softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS, tQscale_row);
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
             Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS.layout()));
             Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
@@ -1524,6 +1533,9 @@ struct CollectiveMainloopFwdSm90 {
                         int const col_idx = get<1>(tScS_rowcol(_0{}, n));
                         tKscale_col(col_idx) = sK_per_scale(col_idx, smem_pipe_read.index());
                     }
+                } else if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                    tKscale_col(0) = tKscale_col(1);
+                    tKscale_col(1) = sK_per_scale(smem_pipe_read.index());
                 }
 
                 warpgroup_wait<1>();
@@ -1538,9 +1550,9 @@ struct CollectiveMainloopFwdSm90 {
                 }
                 scoremod_premask_fn(tSrS, tQscale_row, tKscale_col, smem_pipe_read.index(), m_block, n_block);
                 mask_fn(tSrS, n_block);
-                cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
+                cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS, tQscale_row), scores_scale);
                 if constexpr (LargeHeadDimV) { store_scales(scores_scale, smem_pipe_read_v.index()); }
-                softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
+                softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS, tQscale_row);
                 if constexpr (!HasQv) {
                     warpgroup_wait<0>();
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
@@ -1634,8 +1646,8 @@ struct CollectiveMainloopFwdSm90 {
                 Tensor tKscale_col = make_tensor<float>(Shape<PrefetchKScaleShape>{});
                 scoremod_premask_fn(tSrS, tQscale_row, tKscale_col, smem_pipe_read.index(), m_block, n_block);
                 mask_fn(tSrS, n_block);
-                Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
-                softmax.template online_softmax</*Is_first=*/Is_first_iter, Check_inf>(tSrS);
+                Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/Is_first_iter, Check_inf>(tSrS, tQscale_row);
+                softmax.template online_softmax</*Is_first=*/Is_first_iter, Check_inf>(tSrS, tQscale_row);
                 if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
                 Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV>(tSrS.layout()));
                 Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
