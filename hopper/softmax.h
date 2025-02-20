@@ -38,8 +38,12 @@ __device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const &t
             // CUTE_LOG("thread_reduce_: res: %f, row_scale: %f, summary: %f\n", res, row_scale(mi), summary(mi));
             // }
             res *= row_scale(mi);
+            // CUTE_LOG("thread_reduce_: apply row_scale(%d): %f, res: %f\n", mi, row_scale(mi), res);
+        } else {
+            // CUTE_LOG("thread_reduce_: res: %f\n", res);
         }
         summary(mi) = zero_init ? res : op(summary(mi), res);
+        // CUTE_LOG("thread_reduce_: summary(%d): %f\n", mi, summary(mi));
     }
 }
 
@@ -56,6 +60,7 @@ template<bool zero_init=true, typename Engine0, typename Layout0, typename Engin
 __device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1> &summary, Operator &op, RowScaleT &row_scale) {
     thread_reduce_<zero_init>(tensor, summary, op, row_scale);
     quad_allreduce_(summary, summary, op);
+    // CUTE_LOG("reduce_: summary(0): %f, summary(1): %f\n", summary(0), summary(1));
 }
 
 template<bool zero_init=true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename RowScaleT>
@@ -140,6 +145,9 @@ struct Softmax {
             // CUTE_LOG("Is_first, before reduction, row_max: %f, %f, row_scale: %f, %f\n", row_max(0), row_max(1), row_scale(0), row_scale(1));
             // }
             // }
+            // if (threadIdx.x == 128) {
+            // CUTE_LOG("Is_first, before reduction, row_max: %f, %f\n", row_max(0), row_max(1));
+            // }
             flash::template reduce_max</*zero_init=*/true>(scores, row_max, row_scale);
             // if constexpr (!cute::is_same_v<RowScaleT, std::nullptr_t>) {
             // if (threadIdx.x == 128) {
@@ -150,6 +158,9 @@ struct Softmax {
             //     printf("Is_first, after reduction, row_max: \n");
             //     print_tensor(row_max);
             //     printf("\n");
+            // }
+            // if (threadIdx.x == 128) {
+            // CUTE_LOG("Is_first, after reduction, row_max: %f, %f\n", row_max(0), row_max(1));
             // }
             cute::fill(scores_scale, 1.f);
         } else {
@@ -165,6 +176,9 @@ struct Softmax {
             // CUTE_LOG("Not Is_first, before reduction, row_max: %f, %f, row_scale: %f, %f\n", row_max(0), row_max(1), row_scale(0), row_scale(1));
             // }
             // }
+            // if (threadIdx.x == 128) {
+            // CUTE_LOG("Not Is_first, before reduction, row_max: %f, %f\n", row_max(0), row_max(1));
+            // }
             flash::template reduce_max</*zero_init=*/false>(scores, row_max, row_scale);
             // if constexpr (!cute::is_same_v<RowScaleT, std::nullptr_t>) {
             // if (threadIdx.x == 128) {
@@ -175,6 +189,9 @@ struct Softmax {
             //     printf("Not Is_first, after reduction, row_max: \n");
             //     print_tensor(row_max);
             //     printf("\n");
+            // }
+            // if (threadIdx.x == 128) {
+            // CUTE_LOG("Not Is_first, after reduction, row_max: %f, %f\n", row_max(0), row_max(1));
             // }
             #pragma unroll
             for (int mi = 0; mi < size(row_max); ++mi) {

@@ -246,7 +246,7 @@ def attention_ref(
     #                 print(f"tmp0[{b}][{h}][{row}][{col}] = {tmp[b][h][row][col]}")
 
     if q_descale is not None:
-        # print(f"before, {q_descale = }")
+        print(f"before, {q_descale = }")
         if scaling_recipe == 0:
             q_descale = repeat(q_descale, "b h -> b 1 (h g) 1", g = q.shape[2] // k.shape[2])
         elif scaling_recipe == 2:
@@ -260,7 +260,7 @@ def attention_ref(
         if scaling_recipe == 0:
             k = (k.float() * rearrange(k_descale, "b h -> b 1 h 1")).to(dtype=k.dtype)
         elif scaling_recipe == 2:
-            # print(f"{k_descale = }")
+            print(f"{k_descale = }")
             k = (k.float() * k_descale).to(dtype=k.dtype)
         else:
             raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")

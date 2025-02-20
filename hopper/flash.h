@@ -36,8 +36,8 @@ struct Qkv_params {
 
 enum ScalingRecipe {
     PerKVHead = 0,
-    PerQKVToken,
-    PerQTokenKVBlock
+    PerQKVToken = 1,
+    PerQTokenKVBlock = 2
 };
 
 struct Flash_fwd_params : public Qkv_params {

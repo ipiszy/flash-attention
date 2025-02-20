@@ -52,6 +52,7 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
 # @pytest.mark.parametrize("mha_type", ["mqa"])
+# @pytest.mark.parametrize("mha_type", ["mqa"])
 # @pytest.mark.parametrize("has_qv", [False, True])
 @pytest.mark.parametrize("has_qv", [False])
 # @pytest.mark.parametrize("deterministic", [False, True])
@@ -113,10 +114,10 @@ def test_flash_attn_output(
     torch.random.manual_seed(0)
     # batch_size = 40
     # nheads = 16
-    # batch_size = 1
     batch_size = 9 if seqlen_k <= 2048 else 2
-    # nheads = 1
+    # batch_size = 1
     nheads = 6
+    # nheads = 1
     nheads_kv = nheads if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
     dtype_ref = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
     for dv in [128, d] if d > 128 and d <= 192 else [d]:
@@ -140,16 +141,9 @@ def test_flash_attn_output(
             if scaling_recipe == 0:
                 q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
             elif scaling_recipe == 2:
-                kBlockM = 128 
                 kBlockN = 160
-                def get_q_offset(b, seqlen):
-                    return int((b * seqlen + b * kBlockM) / kBlockM) * kBlockM 
-                q_descale = (torch.rand(nheads, get_q_offset(batch_size, seqlen_q), device=device, dtype=torch.float32)).T
-                # q_descale = (torch.ones(nheads, get_q_offset(batch_size, seqlen_q), device=device, dtype=torch.float32)).T
-                q_descale_ref = torch.empty(batch_size, seqlen_q, nheads, device=device, dtype=torch.float32)
-                for b in range(batch_size):
-                    q_descale_ref[b] = q_descale[get_q_offset(b, seqlen_q) : get_q_offset(b, seqlen_q) + seqlen_q, :]
-                    q_descale[get_q_offset(b, seqlen_q) + seqlen_q : get_q_offset(b + 1, seqlen_q), :] = 0.0
+                q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                q_descale_ref = q_descale.reshape(batch_size, seqlen_q, nheads)
                 k_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
                 # k_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
                 k_descale_ref = repeat(k_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)

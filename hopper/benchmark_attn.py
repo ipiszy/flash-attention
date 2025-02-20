@@ -12,7 +12,7 @@ try:
     import cudnn
 except ImportError:
     cudnn = None
-# cudnn = None
+cudnn = None
 
 Timing = NamedTuple('timing', [('mean', float)])
 
@@ -23,8 +23,8 @@ from einops import rearrange, repeat
 from flash_attn.utils.benchmark import benchmark_forward, benchmark_backward, benchmark_combined, benchmark_all, benchmark_fwd_bwd, pytorch_profiler
 from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 from flash_attn_interface import flash_attn_func as flash_attn_func_v3
-# from flash_attn_interface import flash_attn_with_kvcache as flash_attn_func_v3
-from flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
+from flash_attn_interface import flash_attn_with_kvcache as flash_attn_func_v3
+# from flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
 
 from triton.testing import do_bench
 
@@ -229,9 +229,9 @@ seqlen = 8192
 # seqlen = 4096
 # seqlen = 2047
 dim = 2048
-# headdim = 128
+headdim = 128
 # headdim = 64
-headdim = 256
+# headdim = 256
 # for headdim in [64, 128, 256]:
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384)]
 # bs_seqlen_vals = [(16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384)]
@@ -263,7 +263,7 @@ time_b = {}
 # for headdim in [64, 96, 128]:
 # for headdim in [64, 128, 256]:
 # for headdim in [64, 96, 128, 192, 256]:
-for headdim in [192]:
+for headdim in [128]:
     nheads = dim // headdim
     # headdim = 64
     # batch_size = 64
@@ -280,9 +280,11 @@ for headdim in [192]:
         window_size = (-1, -1)
         # window_size = (seqlen // 2 - 1, 0)
         sink_token_length = 0
-        pack_gqa = None
+        # pack_gqa = None
+        pack_gqa = True
         # seqlen_q = 64
-        seqlen_q = seqlen
+        # seqlen_q = seqlen
+        seqlen_q = 1
         leftpad_k = None
         # leftpad_k = torch.full((batch_size,), 0, device=device, dtype=torch.int32)
         q = torch.randn(batch_size, seqlen_q, nheads, headdim, device=device, dtype=dtype_gen, requires_grad=True)

@@ -92,6 +92,17 @@ public:
     // and nothing else, so we'll pad in case sizeof(smem_o) > sizeof(smem_v).
     static constexpr int mainloop_smem_padding_ = int(sizeof(typename CollectiveEpilogue::TensorStorage)) - int(sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v)));
     static constexpr int mainloop_smem_padding = mainloop_smem_padding_ < 0 ? 0 : mainloop_smem_padding_;
+
+    struct PipelineStorage_KVBlockScaling : cute::aligned_struct<16, _1> {
+        alignas(16) typename CollectiveMainloop::MainloopPipelineKVScaling::SharedStorage pipeline_k_scaling;
+        alignas(16) typename CollectiveMainloop::MainloopPipelineKVScaling::SharedStorage pipeline_v_scaling;
+    };
+    using PipelineStorage_Scaling = cute::conditional_t<
+        Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQTokenKVBlock, 
+        PipelineStorage_KVBlockScaling,
+        std::nullptr_t
+    >;
+
     struct SharedStorage {
         struct TensorStorage : cute::aligned_struct<128, _1> {
             union {
@@ -103,7 +114,7 @@ public:
                 typename CollectiveEpilogue::TensorStorage epilogue;
             };
         } tensors;
-        struct PipelineStorage : cute::aligned_struct<16, _1> {
+        struct PipelineStorage_NoKVScaling : cute::aligned_struct<16, _1> {
             alignas(16) BarrierQ barrier_Q;
             alignas(16) BarrierQScale barrier_Q_scale;
             alignas(16) BarrierQ barrier_Qv;
@@ -115,7 +126,7 @@ public:
             alignas(16) typename CollectiveMainloop::MainloopPipelineKVNew::SharedStorage pipeline_v_new;
             alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
         } pipelines;
-
+        PipelineStorage_Scaling scaling_pipelines;
     };
 
     static constexpr int SharedStorageSize = sizeof(SharedStorage);
@@ -211,7 +222,7 @@ public:
 
         if (warp_idx == 0 && lane_predicate) {
             shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
-            shared_storage.pipelines.barrier_Q_scale.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
+            shared_storage.pipelines.barrier_Q_scale.init(NumProducerThreads /*numThreads*/);
             if constexpr (HasQv) {
                 shared_storage.pipelines.barrier_Qv.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
             }
@@ -225,9 +236,6 @@ public:
             : MainloopPipelineK::ThreadCategory::Consumer;
         if constexpr (Use_TMA_KV) {
             pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
-            if constexpr (Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQKVToken) {
-                pipeline_params_k.transaction_bytes += CollectiveMainloop::TmaTransactionBytesKPerTokenScale;
-            }
             pipeline_params_k.is_leader = warp_group_thread_idx == 0;
             pipeline_params_k.num_consumers = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
         } else {
@@ -298,6 +306,24 @@ public:
         }
         auto pipeline_v_new = cute::conditional_return<AppendKV>(MainloopPipelineKVNew(shared_storage.pipelines.pipeline_v_new, pipeline_params_kv_new, ClusterShape{}), nullptr);
 
+        auto [pipeline_k_scaling, pipeline_v_scaling] = [&] {
+            if constexpr (Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                using MainloopPipelineKVScaling = typename CollectiveMainloop::MainloopPipelineKVScaling;
+                typename MainloopPipelineKVScaling::Params pipeline_params_kv_scaling;
+                pipeline_params_kv_scaling.role = warp_group_idx == 0
+                    ? MainloopPipelineKVScaling::ThreadCategory::Producer
+                    : MainloopPipelineKVScaling::ThreadCategory::Consumer;
+                pipeline_params_kv_scaling.consumer_arv_count = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
+                pipeline_params_kv_scaling.producer_arv_count = NumProducerThreads;
+                return cute::make_tuple(
+                    MainloopPipelineKVScaling(shared_storage.scaling_pipelines.pipeline_k_scaling, pipeline_params_kv_scaling),
+                    MainloopPipelineKVScaling(shared_storage.scaling_pipelines.pipeline_v_scaling, pipeline_params_kv_scaling)
+                );
+            } else {
+                return cute::make_tuple(nullptr, nullptr);
+            }
+        }();
+ 
         CollectiveMainloop collective_mainloop;
         CollectiveEpilogue collective_epilogue;
 
@@ -357,11 +383,11 @@ public:
                     scheduler.prefetch_next_work(params.scheduler, work_tile_info);
                 };
                 // pipeline_vt won't be used if we don't need to transpose V.
-                collective_mainloop.load(params.mainloop, pipeline_k, pipeline_v, pipeline_vt, smem_pipe_write,
-                                         shared_storage, scheduler_prefetch, seqlen_info, block_coord, work_idx);
+                collective_mainloop.load(params.mainloop, pipeline_k, pipeline_v, pipeline_vt, pipeline_k_scaling, pipeline_v_scaling, 
+                                         smem_pipe_write, shared_storage, scheduler_prefetch, seqlen_info, block_coord, work_idx);
                 // CUTE_LOG("producer end: block_coord = %d, %d, %d\n", get<0>(block_coord), get<1>(block_coord), get<2>(block_coord));
             }
-            collective_mainloop.load_tail(pipeline_k, pipeline_v, pipeline_vt, smem_pipe_write, shared_storage, work_idx);
+            collective_mainloop.load_tail(pipeline_k, pipeline_v, pipeline_vt, pipeline_k_scaling, pipeline_v_scaling, smem_pipe_write, shared_storage, work_idx);
             // CUTE_LOG("%s\n", "producer exit");
         } else {  // Consumer
             cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
@@ -396,6 +422,7 @@ public:
                     if constexpr (CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerKVHead) {
                         float const q_descale = params.mainloop.ptr_q_descale == nullptr ? 1.0f : params.mainloop.ptr_q_descale[bidb * get<0>(params.mainloop.stride_q_descale) + bidh_kv * get<1>(params.mainloop.stride_q_descale)];
                         float const k_descale = params.mainloop.ptr_k_descale == nullptr ? 1.0f : params.mainloop.ptr_k_descale[bidb * get<0>(params.mainloop.stride_k_descale) + bidh_kv * get<1>(params.mainloop.stride_k_descale)];
+                        // CUTE_LOG("q_descale = %f, k_descale = %f\n", q_descale, k_descale);
                         softmax_scale_log2 *= q_descale * k_descale;
                     }
                 }
@@ -428,12 +455,12 @@ public:
                 bool tile_valid;
                 if constexpr (!LargeHeadDimV) {
                     tile_valid = collective_mainloop.mma(
-                        params.mainloop, pipeline_k, pipeline_v, smem_pipe_read,
+                        params.mainloop, pipeline_k, pipeline_v, pipeline_k_scaling, pipeline_v_scaling, smem_pipe_read,
                         tOrO, softmax, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage);
                 } else {  // mma_pv might not compile if !LargeHeadDimV
                     if (warp_group_idx == 1) {
                         tile_valid = collective_mainloop.mma(
-                            params.mainloop, pipeline_k, pipeline_v, smem_pipe_read,
+                            params.mainloop, pipeline_k, pipeline_v, pipeline_k_scaling, pipeline_v_scaling, smem_pipe_read,
                             tOrO, softmax, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage);
                     } else {
                         tile_valid = collective_mainloop.mma_pv(
