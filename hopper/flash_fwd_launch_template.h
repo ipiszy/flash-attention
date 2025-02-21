@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "c10/util/Exception.h"
+
 #include "cute/tensor.hpp"
 
 #include "cutlass/cutlass.h"

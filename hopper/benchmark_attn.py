@@ -12,7 +12,7 @@ try:
     import cudnn
 except ImportError:
     cudnn = None
-# cudnn = None
+cudnn = None
 
 Timing = NamedTuple('timing', [('mean', float)])
 
@@ -228,7 +228,7 @@ batch_size = 2
 seqlen = 8192
 # seqlen = 4096
 # seqlen = 2047
-dim = 2048
+dim = 576
 # headdim = 128
 # headdim = 64
 headdim = 256
@@ -237,7 +237,8 @@ headdim = 256
 # bs_seqlen_vals = [(16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384)]
 # bs_seqlen_vals = [(32, 512), (16, 1024)]
 # bs_seqlen_vals = [(2, 64 * 132)]
-bs_seqlen_vals = [(2, 8192)]
+# bs_seqlen_vals = [(2, 8192)]
+bs_seqlen_vals = [(32, 8192 // 4)]
 # bs_seqlen_vals = [(1, 16 * 1024)]
 time_f = {}
 time_b = {}
@@ -263,8 +264,10 @@ time_b = {}
 # for headdim in [64, 96, 128]:
 # for headdim in [64, 128, 256]:
 # for headdim in [64, 96, 128, 192, 256]:
-for headdim in [192]:
-    nheads = dim // headdim
+for headdim in [128]:
+# for headdim in [576]:
+    # nheads = dim // headdim
+    nheads = 1
     # headdim = 64
     # batch_size = 64
     # seqlen = 512
@@ -273,7 +276,7 @@ for headdim in [192]:
     nheads_kv = nheads
     # nheads_kv = nheads // 4
     headdim_v = headdim
-    # headdim_v = 128
+    # headdim_v = 512
 
     for batch_size, seqlen in bs_seqlen_vals:
         num_splits = 1
@@ -282,7 +285,8 @@ for headdim in [192]:
         sink_token_length = 0
         pack_gqa = None
         # seqlen_q = 64
-        seqlen_q = seqlen
+        # seqlen_q = seqlen
+        seqlen_q = 128
         leftpad_k = None
         # leftpad_k = torch.full((batch_size,), 0, device=device, dtype=torch.int32)
         q = torch.randn(batch_size, seqlen_q, nheads, headdim, device=device, dtype=dtype_gen, requires_grad=True)
@@ -371,8 +375,10 @@ for headdim in [192]:
             time.sleep(1)
             if not varlen:
                 # m1 = time_fwd(flash_attn_func_v3, q, k if page_size is None else k_paged, v_fa3 if page_size is None else v_paged, cache_leftpad = leftpad_k, page_table=page_table, causal=causal, window_size=window_size, sink_token_length=sink_token_length, softcap=softcap, num_splits=num_splits, pack_gqa=pack_gqa, repeats=repeats, verbose=verbose, desc='Fav3')
+                # print("before", flush=True)
                 m1 = time_fwd(flash_attn_func_v3, q, k if page_size is None else k_paged, v_fa3 if page_size is None else v_paged, causal=causal, window_size=window_size, sink_token_length=sink_token_length, softcap=softcap, num_splits=num_splits, pack_gqa=pack_gqa, repeats=repeats, verbose=verbose, desc='Fav3')
-                # pytorch_profiler(flash_attn_func_v3, q, k if page_size is None else k_paged, v_fa3 if page_size is None else v_paged, page_table=page_table, causal=causal, window_size=window_size, softcap=softcap, num_splits=num_splits, pack_gqa=pack_gqa)
+                # print("after", flush=True)
+                # m1 = pytorch_profiler(flash_attn_func_v3, q, k if page_size is None else k_paged, v_fa3 if page_size is None else v_paged, causal=causal, window_size=window_size, sink_token_length=sink_token_length, softcap=softcap, num_splits=num_splits, pack_gqa=pack_gqa)
             else:
                 m1 = time_fwd(flash_attn_varlen_func_v3, q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, None, None, seqlen_q, seqlen, causal=causal, window_size=window_size, softcap=softcap, num_splits=num_splits, pack_gqa=pack_gqa, repeats=repeats, verbose=verbose, desc='Fav3')
                 # pytorch_profiler(flash_attn_varlen_func_v3, q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, seqlen_q, seqlen, causal=causal, window_size=window_size, softcap=softcap, num_splits=num_splits)

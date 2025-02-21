@@ -177,5 +177,8 @@
     } else if (HEADDIM == 256) {                                                                 \
       constexpr static int kHeadSize = 256;                                                      \
       return __VA_ARGS__();                                                                      \
+    } else if (HEADDIM == 512) {                                                                 \
+      constexpr static int kHeadSize = 512;                                                      \
+      return __VA_ARGS__();                                                                      \
     }                                                                                            \
   }()

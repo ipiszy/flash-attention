@@ -57,7 +57,8 @@ struct CollectiveMainloopFwdSm90 {
     static_assert(Use_TMA_KV || CUTE_STATIC_V(size(ClusterShape{})) == 1, "If not using TMA for KV, ClusterShape must be 1");
     static_assert(Use_TMA_KV || !V_colmajor, "If not using TMA for KV, V_colmajor is not supported");
     static constexpr bool SameHeadDim = get<2>(TileShape_MNK{}) == kHeadDimV;
-    static constexpr bool LargeHeadDimV = kHeadDimV > 256;
+    // static constexpr bool LargeHeadDimV = kHeadDimV > 256;
+    static constexpr bool LargeHeadDimV = false;
     using SeqlenInfo_t = flash::SeqlenInfoQKNewK<Varlen, AppendKV>;
 
     static_assert(ArchTag::kMinComputeCapability >= 90);

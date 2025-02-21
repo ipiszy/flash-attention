@@ -40,7 +40,8 @@ struct CollectiveEpilogueFwd {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static constexpr int kHeadDimV = get<1>(TileShape_MNK_PV{});
 
-    static constexpr bool LargeHeadDimV = kHeadDimV > 256;
+    // static constexpr bool LargeHeadDimV = kHeadDimV > 256;
+    static constexpr bool LargeHeadDimV = false;
 
     using GmemTiledCopyOTMA = cute::SM90_TMA_STORE;
 

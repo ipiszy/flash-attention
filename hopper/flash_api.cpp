@@ -425,6 +425,7 @@ inline int get_num_splits(Flash_fwd_params const& params) {
 }
 
 inline int get_max_headdim() {
+    return 576;
     #ifndef FLASHATTENTION_DISABLE_HDIM256
     return 256;
     #endif
@@ -579,14 +580,14 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     int const max_headdim = get_max_headdim();
     TORCH_CHECK(head_size <= max_headdim, "FlashAttention forward only supports head dimension at most " + std::to_string(max_headdim));
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
-    if (head_size_v != head_size) {
-        TORCH_CHECK(head_size > 128 && head_size <= 192 && head_size_v > 96 && head_size_v <= 128, "If V headdim is different from Q/K dim, we only support Q/K headdim in (128, 192] and V headdim in (96, 128]");
-        TORCH_CHECK(dprops->major == 9, "Only Hopper supports different V headdim");
-        if (head_size_v > 256) {
-            TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
-                        "HeaddimV > 256 requires fp16 and bf16 data type");
-        }
-    }
+    // if (head_size_v != head_size) {
+    //     TORCH_CHECK(head_size > 128 && head_size <= 192 && head_size_v > 96 && head_size_v <= 128, "If V headdim is different from Q/K dim, we only support Q/K headdim in (128, 192] and V headdim in (96, 128]");
+    //     TORCH_CHECK(dprops->major == 9, "Only Hopper supports different V headdim");
+    //     if (head_size_v > 256) {
+    //         TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
+    //                     "HeaddimV > 256 requires fp16 and bf16 data type");
+    //     }
+    // }
 
     // This needs to go before kBlockM & kBlockN since we rely on the correct window_size and is_causal to set kBlockM
     // TODO: check this

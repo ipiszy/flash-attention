@@ -8,3 +8,4 @@
 #include "flash_fwd_hdim192_bf16_sm90.cu"
 #include "flash_fwd_hdim192_128_bf16_sm90.cu"
 #include "flash_fwd_hdim256_bf16_sm90.cu"
+#include "flash_fwd_hdim576_512_bf16_sm90.cu"
