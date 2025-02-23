@@ -33,7 +33,7 @@ with open("../README.md", "r", encoding="utf-8") as fh:
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-PACKAGE_NAME = "flash_attn"
+PACKAGE_NAME = "flash_attn_3"
 
 BASE_WHEEL_URL = "https://github.com/Dao-AILab/flash-attention/releases/download/{tag_name}/{wheel_name}"
 
@@ -150,6 +150,8 @@ def _write_ninja_file(path,
         flags.append(f'cuda_post_cflags_sm80 = {" ".join(cuda_post_cflags_sm80)}')
         cuda_post_cflags_sm80_sm90 = cuda_post_cflags + ['-gencode', 'arch=compute_80,code=sm_80']
         flags.append(f'cuda_post_cflags_sm80_sm90 = {" ".join(cuda_post_cflags_sm80_sm90)}')
+        cuda_post_cflags_sm100 = [s if s != 'arch=compute_90a,code=sm_90a' else 'arch=compute_100a,code=sm_100a' for s in cuda_post_cflags]
+        flags.append(f'cuda_post_cflags_sm100 = {" ".join(cuda_post_cflags_sm100)}')
     flags.append(f'cuda_dlink_post_cflags = {" ".join(cuda_dlink_post_cflags)}')
     flags.append(f'ldflags = {" ".join(ldflags)}')
 
@@ -187,6 +189,9 @@ def _write_ninja_file(path,
         cuda_compile_rule_sm80_sm90 = ['rule cuda_compile_sm80_sm90'] + cuda_compile_rule[1:] + [
             f'  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags_sm80_sm90'
         ]
+        cuda_compile_rule_sm100 = ['rule cuda_compile_sm100'] + cuda_compile_rule[1:] + [
+            f'  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags_sm100'
+        ]
         cuda_compile_rule.append(
             f'  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags')
 
@@ -199,6 +204,8 @@ def _write_ninja_file(path,
                 rule = 'cuda_compile'
             elif source_file.endswith('_sm80.cu'):
                 rule = 'cuda_compile_sm80'
+            elif source_file.endswith('_sm100.cu'):
+                rule = 'cuda_compile_sm100'
             else:
                 rule = 'cuda_compile_sm80_sm90'
         else:
@@ -244,6 +251,7 @@ def _write_ninja_file(path,
         blocks.append(cuda_compile_rule)  # type: ignore[possibly-undefined]
         blocks.append(cuda_compile_rule_sm80)  # type: ignore[possibly-undefined]
         blocks.append(cuda_compile_rule_sm80_sm90)  # type: ignore[possibly-undefined]
+        blocks.append(cuda_compile_rule_sm100)  # type: ignore[possibly-undefined]
     blocks += [devlink_rule, link_rule, build, devlink, link, default]
     content = "\n\n".join("\n".join(b) for b in blocks)
     # Ninja requires a new lines at the end of the .ninja file
@@ -366,7 +374,7 @@ def nvcc_threads_args():
 
 
 # NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.3.107"}
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.8.61"}
+NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.61"}
 exe_extension = sysconfig.get_config_var("EXE")
 
 
@@ -382,15 +390,17 @@ if not SKIP_CUDA_BUILD:
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
-    check_if_cuda_home_none("flash_attn")
+    check_if_cuda_home_none(PACKAGE_NAME)
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     if bare_metal_version < Version("12.3"):
         raise RuntimeError("FlashAttention-3 is only supported on CUDA 12.3 and above")
 
-    if bare_metal_version != Version("12.8"):  # nvcc 12.8 gives the best perf currently
+    # ptxas 12.8 gives the best perf currently
+    # We want to use the nvcc front end from 12.6 however, since if we use nvcc 12.8
+    # Cutlass 3.8 will expect the new data types in cuda.h from CTK 12.8, which we don't have.
+    if bare_metal_version != Version("12.8"):
         download_and_copy(
             name="nvcc",
-            # src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas{exe_extension}",
             src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin",
             dst_path="bin",
             version=NVIDIA_TOOLCHAIN_VERSION["nvcc"],
@@ -398,11 +408,18 @@ if not SKIP_CUDA_BUILD:
             f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
         )
         download_and_copy(
-            name="nvcc",
-            # src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas{exe_extension}",
+            name="ptxas",
+            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas",
+            dst_path="bin",
+            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
+            url_func=lambda system, arch, version:
+            f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
+        )
+        download_and_copy(
+            name="ptxas",
             src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/nvvm/bin",
             dst_path="nvvm/bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["nvcc"],
+            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
             url_func=lambda system, arch, version:
             f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",
         )
@@ -411,7 +428,7 @@ if not SKIP_CUDA_BUILD:
         nvcc_path_new = os.path.join(ctk_path_new, f"nvcc{exe_extension}")
         # Need to append to path otherwise nvcc can't find cicc in nvvm/bin/cicc
         # nvcc 12.8 seems to hard-code looking for cicc in ../nvvm/bin/cicc
-        # os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
+        os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
         os.environ["PYTORCH_NVCC"] = nvcc_path_new
         # Make nvcc executable, sometimes after the copy it loses its permissions
         os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
@@ -461,7 +478,7 @@ if not SKIP_CUDA_BUILD:
         + ([192] if not DISABLE_HDIM192 else [])
         + ([256] if not DISABLE_HDIM256 else [])
     )
-    HEAD_DIMENSIONS_FWD = ["all"]
+    HEAD_DIMENSIONS_FWD = ["all", "diff"]
     HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD
     SPLIT = [""] + (["_split"] if not DISABLE_SPLIT else [])
     PAGEDKV = [""] + (["_paged"] if not DISABLE_PAGEDKV else [])

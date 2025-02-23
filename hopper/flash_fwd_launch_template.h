@@ -216,14 +216,14 @@ void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream) {
                     static constexpr int kBlockM = Arch >= 90 ? std::get<0>(tile_size_fwd_sm90(kHeadDim, kHeadDimV, Is_causal, Is_local, sizeof(T) /*element_size*/, V_colmajor, PagedKV, Has_softcap, kScalingRecipe)) : 128;
 
                     // On nvcc 12.8, hdim 128, without cluster is faster (730 vs 700 TFLOPS)
-                    static constexpr bool Enable_cluster = Arch >= 90 && (sizeof(T) == 2 ? (kHeadDim >= 192) : (kHeadDim == 192)) && !Is_causal && !Is_local && !Split && !PagedKV && !Varlen;
+                    static constexpr bool Enable_cluster = Arch == 90 && (sizeof(T) == 2 ? (kHeadDim >= 192) : (kHeadDim == 192)) && !Is_causal && !Is_local && !Split && !PagedKV && !Varlen;
                     BOOL_SWITCH(params.qv_ptr, HasQV_, [&] {
-                        static constexpr bool HasQv = HasQV_ && Arch == 90 && !Is_FP8 && kHeadDim == 64 and false;
+                        static constexpr bool HasQv = HasQV_ && Arch == 90 && !Is_FP8 && kHeadDim == 64 && kHeadDimV == 512;
                         APPENDKV_SWITCH(params.knew_ptr, AppendKV, [&] {
                             // Only use Cluster if number of tiles along seqlen_q is even and not varlen
                             CLUSTER_SWITCH(cutlass::ceil_div(params.seqlen_q * (!PackGQA ? 1 : params.h / params.h_k), kBlockM) % 2 == 0, Use_cluster, [&] {
-                            static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
-                                run_flash_fwd<Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV && Varlen, HasQv, PackGQA, Split, V_colmajor, kScalingRecipe>(params, stream);
+                                static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
+                                    run_flash_fwd<Arch, kHeadDim, kHeadDimV, ClusterM, T, T_out, Is_causal, Is_local, Has_softcap, Varlen, PagedKV, AppendKV && Varlen, HasQv, PackGQA, Split, V_colmajor, kScalingRecipe>(params, stream);
                             });
                         });
                     });
