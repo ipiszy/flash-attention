@@ -238,6 +238,9 @@ public:
             pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
             pipeline_params_k.is_leader = warp_group_thread_idx == 0;
             pipeline_params_k.num_consumers = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
+            if (Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                pipeline_params_k.num_producers = NumProducerThreads;
+            }
         } else {
             pipeline_params_k.consumer_arv_count = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
             pipeline_params_k.producer_arv_count = NumProducerThreads;
