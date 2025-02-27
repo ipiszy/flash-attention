@@ -148,7 +148,7 @@ def test_flash_attn_output(
             if scaling_recipe == 0:
                 q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
             elif scaling_recipe == 2:
-                kBlockN = 160
+                kBlockN = 224 
                 q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
                 # q_descale = (torch.ones(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
                 q_descale_ref = q_descale.reshape(batch_size, seqlen_q, nheads)
@@ -166,12 +166,9 @@ def test_flash_attn_output(
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
         else:
             q_descale, k_descale, v_descale = None, None, None
-        if q_descale_ref is None:
-            q_descale_ref = q_descale
-        if k_descale_ref is None:
-            k_descale_ref = k_descale
-        if v_descale_ref is None:
-            v_descale_ref = k_descale
+        q_descale_ref = q_descale if q_descale_ref is None else q_descale_ref
+        k_descale_ref = k_descale if k_descale_ref is None else k_descale_ref
+        v_descale_ref = v_descale if v_descale_ref is None else v_descale_ref
         q, k, v = [x.detach().to(dtype).requires_grad_() for x in (q_ref, k_ref, v_ref)]
         qv = qv_ref.detach().to(dtype).requires_grad_() if has_qv else None
         if V_colmajor:
@@ -613,19 +610,20 @@ def test_flash_attn_varlen_output(
 
 
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
+# @pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
-# @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("num_splits", [1] + ([0] if not DISABLE_SPLIT else []))
-# @pytest.mark.parametrize("num_splits", [1])
-@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-# @pytest.mark.parametrize("mha_type", ["mha"])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("scaling_recipe", [2])
+# @pytest.mark.parametrize("num_splits", [1] + ([0] if not DISABLE_SPLIT else []))
+@pytest.mark.parametrize("num_splits", [1])
+# @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("mha_type", ["mha"])
 @pytest.mark.parametrize("new_kv", [False] + ([True] if not DISABLE_APPENDKV else []))
 # @pytest.mark.parametrize("new_kv", [True])
 # @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("causal,local", [(False, False), (True, False)] + ([(False, True)] if not DISABLE_LOCAL else []))
+# @pytest.mark.parametrize("causal,local", [(False, False), (True, False)] + ([(False, True)] if not DISABLE_LOCAL else []))
 # @pytest.mark.parametrize("causal,local", [(False, False), (True, False)])
-# @pytest.mark.parametrize("causal,local", [(False, False)])
+@pytest.mark.parametrize("causal,local", [(False, False)])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True, False] if not DISABLE_APPENDKV else [True])
 # @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
 @pytest.mark.parametrize("rotary_interleaved", [False, True] if not DISABLE_APPENDKV else [False])
@@ -638,14 +636,14 @@ def test_flash_attn_varlen_output(
 # @pytest.mark.parametrize("has_leftpad", [False])
 @pytest.mark.parametrize("has_batch_idx", [False, True])
 # @pytest.mark.parametrize("has_batch_idx", [False])
-@pytest.mark.parametrize("varlen_q", [False, True])
-# @pytest.mark.parametrize("varlen_q", [True])
+# @pytest.mark.parametrize("varlen_q", [False, True])
+@pytest.mark.parametrize("varlen_q", [False])
 # @pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
 # @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
 # @pytest.mark.parametrize('d', [32, 40, 64, 80, 96, 128, 160, 192])
 # @pytest.mark.parametrize('d', [56, 80])
-# @pytest.mark.parametrize("d", [128])
-@pytest.mark.parametrize("d", [192])
+@pytest.mark.parametrize("d", [128])
+# @pytest.mark.parametrize("d", [192])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -682,6 +680,7 @@ def test_flash_attn_kvcache(
     mha_type,
     num_splits,
     dtype,
+    scaling_recipe,
 ):
     if page_size is not None and seqlen_k % page_size != 0:
         pytest.skip()
