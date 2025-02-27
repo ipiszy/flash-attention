@@ -134,9 +134,10 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         // This makes coding a bit easier.
         {params.q_descale_len, params.h},
         {params.k_descale_len, params.h},
+        {params.v_descale_len, params.h},
         (params.scaling_recipe) ? cute::make_stride(1l, params.q_descale_head_stride) : cute::make_stride(params.q_descale_batch_stride, params.q_descale_head_stride),
         (params.scaling_recipe) ? cute::make_stride(1l, params.k_descale_head_stride) : cute::make_stride(params.k_descale_batch_stride, params.k_descale_head_stride),
-        {params.v_descale_batch_stride, params.v_descale_head_stride},
+        (params.scaling_recipe) ? cute::make_stride(1l, params.v_descale_head_stride) : cute::make_stride(params.v_descale_batch_stride, params.v_descale_head_stride),
         params.window_size_left, params.window_size_right, params.sink_token_length,
         params.softcap,
         params.num_splits,

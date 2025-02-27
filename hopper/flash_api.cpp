@@ -931,10 +931,28 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         if (v_descale_.has_value()) {
             auto v_descale = v_descale_.value();
             CHECK_DEVICE(v_descale);
-            CHECK_SHAPE(v_descale, batch_size, num_heads_k);
+            switch (scaling_recipe) {
+                case ScalingRecipe::PerKVHead:
+                    // Per-K head scaling.
+                    CHECK_SHAPE(v_descale, batch_size, num_heads_k);
+                    params.v_descale_batch_stride = v_descale.stride(0);
+                    params.v_descale_head_stride = v_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQKVToken:
+                    // Per-token scaling
+                    TORCH_CHECK(v_descale.size(1) == num_heads_k, "v_descale shape[-1] must be equal to num_heads_v, but got ", v_descale.size(1), " and ", num_heads_k);
+                    params.v_descale_len = v_descale.size(0);
+                    params.v_descale_head_stride = v_descale.stride(1);
+                    break;
+                case ScalingRecipe::PerQTokenKVBlock:
+                    TORCH_CHECK(v_descale.size(1) == num_heads_k, "v_descale shape[-1] must be equal to num_heads_k, but got ", v_descale.size(1), " and ", num_heads_k);
+                    params.v_descale_len = v_descale.size(0);
+                    params.v_descale_head_stride = v_descale.stride(1);
+                    break;
+                default:
+                    TORCH_CHECK(false, "Invalid scaling recipe: " + std::to_string(scaling_recipe));
+            }
             params.v_descale_ptr = v_descale.data_ptr<float>();
-            params.v_descale_batch_stride = v_descale.stride(0);
-            params.v_descale_head_stride = v_descale.stride(1);
         } else {
             params.v_descale_ptr = nullptr;
         }

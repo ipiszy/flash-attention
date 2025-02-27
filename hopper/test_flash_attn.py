@@ -55,7 +55,6 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
 # @pytest.mark.parametrize("mha_type", ["mqa"])
-# @pytest.mark.parametrize("mha_type", ["mqa"])
 # @pytest.mark.parametrize("has_qv", [False, True])
 @pytest.mark.parametrize("has_qv", [False])
 # @pytest.mark.parametrize("deterministic", [False, True])
@@ -83,6 +82,8 @@ COMPILED_HDIMS = (
         (1, 1),
         (1, 161),
         (129, 1),
+        (1, 4096),
+        (4096, 1),
         (64, 128),
         (128, 192),
         (256, 256),
@@ -125,11 +126,13 @@ def test_flash_attn_output(
     dtype_ref = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
     for dv in [128, d] if d > 128 and d <= 192 else [d]:
         q_ref = torch.randn(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype_ref)
+        # q_ref = torch.ones(batch_size, seqlen_q, nheads, d, device=device, dtype=dtype_ref)
         if softcap > 0.0:
             # Ensure the values of qk are at least within softcap range.
             q_ref = (q_ref * softcap / 4)
         q_ref = q_ref.to(dtype).to(dtype_ref).requires_grad_()
         k_ref = torch.randn(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
+        # k_ref = torch.ones(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
         v_ref = torch.randn(batch_size, seqlen_k, nheads_kv, dv, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
         if has_qv:
             qv_ref = torch.randn(batch_size, seqlen_q, nheads, dv, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref)
@@ -140,18 +143,25 @@ def test_flash_attn_output(
         # window_size = (-1, -1) if not local else (16, 0)
         q_descale_ref = None
         k_descale_ref = None
+        v_descale_ref = None
         if dtype == torch.float8_e4m3fn:
             if scaling_recipe == 0:
                 q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
             elif scaling_recipe == 2:
                 kBlockN = 160
                 q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                # q_descale = (torch.ones(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
                 q_descale_ref = q_descale.reshape(batch_size, seqlen_q, nheads)
                 k_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
-                # k_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                # k_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{k_descale = }")
                 k_descale_ref = repeat(k_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
                 k_descale_ref = k_descale_ref.reshape(batch_size, -1, k_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
-                v_descale = torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2
+                # v_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                v_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{v_descale = }")
+                v_descale_ref = repeat(v_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
+                v_descale_ref = v_descale_ref.reshape(batch_size, -1, v_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
             else:
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
         else:
@@ -160,6 +170,8 @@ def test_flash_attn_output(
             q_descale_ref = q_descale
         if k_descale_ref is None:
             k_descale_ref = k_descale
+        if v_descale_ref is None:
+            v_descale_ref = k_descale
         q, k, v = [x.detach().to(dtype).requires_grad_() for x in (q_ref, k_ref, v_ref)]
         qv = qv_ref.detach().to(dtype).requires_grad_() if has_qv else None
         if V_colmajor:
@@ -172,7 +184,7 @@ def test_flash_attn_output(
             None,
             causal=causal,
             qv=qv_ref,
-            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale_ref,
             window_size=window_size,
             sink_token_length=sink_token_length,
             softcap=softcap,
@@ -186,7 +198,7 @@ def test_flash_attn_output(
             None,
             causal=causal,
             qv=qv_ref,
-            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale_ref,
             window_size=window_size,
             sink_token_length=sink_token_length,
             softcap=softcap,
@@ -234,7 +246,6 @@ def test_flash_attn_output(
             print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
             # if not causal:
             #     print(f"LSE max diff: {(lse - lse_ref).abs().max().item()}")
-            # breakpoint()
 
             # Check that FlashAttention's numerical error is at most twice the numerical error
             # of a Pytorch implementation.

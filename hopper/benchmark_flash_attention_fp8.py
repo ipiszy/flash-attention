@@ -289,13 +289,14 @@ for causal in causal_vals:
             if scaling_recipe == 0:
                 q_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
                 k_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
+                v_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda') 
             elif scaling_recipe == 2:
                 q_descale = torch.tensor([[1.0] * int(seqlen * batch_size)] * nheads, dtype=torch.float32, device='cuda').T
                 k_descale = torch.tensor([[1.0] * int((seqlen + 159) / 160) * batch_size] * nheads, dtype=torch.float32, device='cuda').T
+                v_descale = torch.tensor([[1.0] * int((seqlen + 159) / 160) * batch_size] * nheads, dtype=torch.float32, device='cuda').T
             else:
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
 
-            v_descale = torch.tensor([[1.0] * nheads] * batch_size, dtype=torch.float32, device='cuda')
             print(f"{q_descale.shape=}, {q_descale.stride()=}, {k_descale.shape=}, {k_descale.stride()=}", flush=True)
 
             # f = time_fwd(flash_attn_func, q, k, v, causal=causal, repeats=repeats, verbose=False)

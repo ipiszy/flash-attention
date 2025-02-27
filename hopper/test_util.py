@@ -260,12 +260,18 @@ def attention_ref(
         if scaling_recipe == 0:
             k = (k.float() * rearrange(k_descale, "b h -> b 1 h 1")).to(dtype=k.dtype)
         elif scaling_recipe == 2:
-            print(f"{k_descale = }")
+            # print(f"{k_descale = }")
             k = (k.float() * k_descale).to(dtype=k.dtype)
         else:
             raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
     if v_descale is not None:
-        v = (v.float() * rearrange(v_descale, "b h -> b 1 h 1")).to(dtype=v.dtype)
+        if scaling_recipe == 0:
+            v = (v.float() * rearrange(v_descale, "b h -> b 1 h 1")).to(dtype=k.dtype)
+        elif scaling_recipe == 2:
+            # print(f"{v_descale = }")
+            v = (v.float() * v_descale).to(dtype=v.dtype)
+        else:
+            raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
     seqlen_q, seqlen_k = q.shape[1], k.shape[1]
     k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=q.shape[2] // v.shape[2])

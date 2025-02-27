@@ -238,9 +238,6 @@ public:
             pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
             pipeline_params_k.is_leader = warp_group_thread_idx == 0;
             pipeline_params_k.num_consumers = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
-            if (Is_FP8 && CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                pipeline_params_k.num_producers = NumProducerThreads;
-            }
         } else {
             pipeline_params_k.consumer_arv_count = !LargeHeadDimV ? NumMmaThreads : cutlass::NumThreadsPerWarpGroup;
             pipeline_params_k.producer_arv_count = NumProducerThreads;
@@ -424,7 +421,6 @@ public:
                     if constexpr (CollectiveMainloop::kScalingRecipe == ScalingRecipe::PerKVHead) {
                         float const q_descale = params.mainloop.ptr_q_descale == nullptr ? 1.0f : params.mainloop.ptr_q_descale[bidb * get<0>(params.mainloop.stride_q_descale) + bidh_kv * get<1>(params.mainloop.stride_q_descale)];
                         float const k_descale = params.mainloop.ptr_k_descale == nullptr ? 1.0f : params.mainloop.ptr_k_descale[bidb * get<0>(params.mainloop.stride_k_descale) + bidh_kv * get<1>(params.mainloop.stride_k_descale)];
-                        // CUTE_LOG("q_descale = %f, k_descale = %f\n", q_descale, k_descale);
                         softmax_scale_log2 *= q_descale * k_descale;
                     }
                 }
