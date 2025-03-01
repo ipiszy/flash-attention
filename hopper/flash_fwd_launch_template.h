@@ -88,6 +88,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     if constexpr (Scaling_Recipe == ScalingRecipe::PerQTokenKVBlock) {
         TORCH_CHECK(
             params.k_descale_len == (params.seqlen_k + kBlockN - 1) / kBlockN * (params.kv_batch_idx ? params.b_k : params.b), 
+            "kv descale length must be equal to (seqlen_k + kBlockN - 1) / kBlockN * batch_size_k. "
             "kBlockN: ", std::to_string(kBlockN), 
             ", params.k_descale_len: ", std::to_string(params.k_descale_len), 
             ", params.seqlen_k: ", std::to_string(params.seqlen_k),

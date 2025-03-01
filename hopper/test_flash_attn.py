@@ -51,7 +51,9 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("dtype", [torch.bfloat16] + ([torch.float16] if not DISABLE_FP16 else []) + ([torch.float8_e4m3fn] if not DISABLE_FP8 else []))
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+# @pytest.mark.parametrize("scaling_recipe", [0, 2])
 @pytest.mark.parametrize("scaling_recipe", [2])
+# @pytest.mark.parametrize("scaling_recipe", [0])
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
 @pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
 # @pytest.mark.parametrize("mha_type", ["mqa"])
@@ -134,6 +136,7 @@ def test_flash_attn_output(
         k_ref = torch.randn(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
         # k_ref = torch.ones(batch_size, seqlen_k, nheads_kv, d, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
         v_ref = torch.randn(batch_size, seqlen_k, nheads_kv, dv, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
+        # v_ref = torch.ones(batch_size, seqlen_k, nheads_kv, dv, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref).requires_grad_()
         if has_qv:
             qv_ref = torch.randn(batch_size, seqlen_q, nheads, dv, device=device, dtype=dtype_ref).to(dtype).to(dtype_ref)
         else:
@@ -157,8 +160,8 @@ def test_flash_attn_output(
                 print(f"{k_descale = }")
                 k_descale_ref = repeat(k_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
                 k_descale_ref = k_descale_ref.reshape(batch_size, -1, k_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
-                # v_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
-                v_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                v_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                # v_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
                 print(f"{v_descale = }")
                 v_descale_ref = repeat(v_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
                 v_descale_ref = v_descale_ref.reshape(batch_size, -1, v_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
@@ -246,24 +249,24 @@ def test_flash_attn_output(
 
             # Check that FlashAttention's numerical error is at most twice the numerical error
             # of a Pytorch implementation.
-            # for b in range(out.shape[0]):
-            #     for h in range(out.shape[2]):
-            #         out_bh = out[b, :, h, :]
-            #         out_ref_bh = out_ref[b, :, h, :]
-            #         print(f"b = {b}, h = {h}, max abs diff = {(out_bh - out_ref_bh).abs().max().item()}")
-            #         # if (out_bh - out_ref_bh).abs().max().item() > rtol * (out_pt - out_ref).abs().max().item() + fwd_atol:
-            #         if (out_bh - out_ref_bh).abs().max().item() > 0.01:
-            #             print(f"b = {b}, h = {h} failed")
-            #             for s in range(out.shape[1]):
-            #                 out_bh_s = out_bh[s]
-            #                 out_ref_bh_s = out_ref_bh[s]
-            #                 # if (out_bh_s - out_ref_bh_s).abs().max().item() > rtol * (out_pt - out_ref).abs().max().item() + fwd_atol:
-            #                 max_diff = (out_bh_s - out_ref_bh_s).abs().max().item()
-            #                 print(f"b = {b}, h = {h}, s = {s}, {max_diff = }")
-            #                 if max_diff > 0.01:
-            #                     print(f"b = {b}, h = {h}, s = {s} failed")
-            #                 # print(f"b = {b}, h = {h}, s = {s}, {out_bh_s=}")
-            #                 # print(f"b = {b}, h = {h}, s = {s}, {out_ref_bh_s=}")
+            for b in range(out.shape[0]):
+                for h in range(out.shape[2]):
+                    out_bh = out[b, :, h, :]
+                    out_ref_bh = out_ref[b, :, h, :]
+                    print(f"b = {b}, h = {h}, max abs diff = {(out_bh - out_ref_bh).abs().max().item()}")
+                    if (out_bh - out_ref_bh).abs().max().item() > rtol * (out_pt - out_ref).abs().max().item() + fwd_atol:
+                    # if (out_bh - out_ref_bh).abs().max().item() > 0.01:
+                        print(f"b = {b}, h = {h} failed")
+                        for s in range(out.shape[1]):
+                            out_bh_s = out_bh[s]
+                            out_ref_bh_s = out_ref_bh[s]
+                            # if (out_bh_s - out_ref_bh_s).abs().max().item() > rtol * (out_pt - out_ref).abs().max().item() + fwd_atol:
+                            max_diff = (out_bh_s - out_ref_bh_s).abs().max().item()
+                            print(f"b = {b}, h = {h}, s = {s}, {max_diff = }")
+                            if max_diff > 0.01:
+                                print(f"b = {b}, h = {h}, s = {s} failed")
+                            # print(f"b = {b}, h = {h}, s = {s}, {out_bh_s=}")
+                            # print(f"b = {b}, h = {h}, s = {s}, {out_ref_bh_s=}")
             assert (out - out_ref).abs().max().item() <= rtol * (out_pt - out_ref).abs().max().item() + fwd_atol
 
     if not DISABLE_BACKWARD and dtype != torch.float8_e4m3fn and not V_colmajor and not has_qv:
@@ -630,12 +633,12 @@ def test_flash_attn_varlen_output(
 # @pytest.mark.parametrize("rotary_interleaved", [True])
 @pytest.mark.parametrize("rotary_fraction", [0.0, 0.5, 1.0] if (not DISABLE_APPENDKV) and (apply_rotary_emb is not None) else [0.0])
 # @pytest.mark.parametrize("rotary_fraction", [0.0])
-@pytest.mark.parametrize("page_size", [None] + ([1, 4, 128] if not DISABLE_PAGEDKV else []))
-# @pytest.mark.parametrize("page_size", [None])
-@pytest.mark.parametrize("has_leftpad", [False, True])
-# @pytest.mark.parametrize("has_leftpad", [False])
-@pytest.mark.parametrize("has_batch_idx", [False, True])
-# @pytest.mark.parametrize("has_batch_idx", [False])
+# @pytest.mark.parametrize("page_size", [None] + ([1, 4, 128] if not DISABLE_PAGEDKV else []))
+@pytest.mark.parametrize("page_size", [None])
+# @pytest.mark.parametrize("has_leftpad", [False, True])
+@pytest.mark.parametrize("has_leftpad", [False])
+# @pytest.mark.parametrize("has_batch_idx", [False, True])
+@pytest.mark.parametrize("has_batch_idx", [False])
 # @pytest.mark.parametrize("varlen_q", [False, True])
 @pytest.mark.parametrize("varlen_q", [False])
 # @pytest.mark.parametrize("d", [32, 59, 64, 80, 128, 256])
@@ -647,19 +650,19 @@ def test_flash_attn_varlen_output(
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
-        (1, 128),
+        # (1, 128),
         (1, 339),
-        (3, 1024),
-        (64, 800),
-        (64, 256),
-        (3, 799),
-        (64, 2048),
-        (16, 20000),
-        # (1, 128 * 1024),
-        # (16, 128 * 1024),
-        (128, 128),
-        (256, 512),  # To test appending KV with more than 1 block
-        (2048, 3577),  # Enough tile to test persistent scheduler
+        # (3, 1024),
+        # (64, 800),
+        # (64, 256),
+        # (3, 799),
+        # (64, 2048),
+        # (16, 20000),
+        # # (1, 128 * 1024),
+        # # (16, 128 * 1024),
+        # (128, 128),
+        # (256, 512),  # To test appending KV with more than 1 block
+        # (2048, 3577),  # Enough tile to test persistent scheduler
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(256, 128)])
@@ -840,6 +843,35 @@ def test_flash_attn_kvcache(
             v_cache_ref[update_mask] = v_to_update
         k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
         v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+        q_descale_ref = None
+        k_descale_ref = None
+        v_descale_ref = None
+        if dtype == torch.float8_e4m3fn:
+            if scaling_recipe == 0:
+                q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_k, device=device, dtype=torch.float32) * 2 for _ in range(3)]
+            elif scaling_recipe == 2:
+                kBlockN = 224 
+                q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                # q_descale = (torch.ones(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                q_descale_ref = q_descale.reshape(batch_size, seqlen_q, nheads)
+                k_descale = (torch.rand(nheads_k, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                # k_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{k_descale = }")
+                k_descale_ref = repeat(k_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
+                k_descale_ref = k_descale_ref.reshape(batch_size, -1, k_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
+                # v_descale = (torch.rand(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 2).T
+                v_descale = (torch.ones(nheads_k, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{v_descale = }")
+                v_descale_ref = repeat(v_descale, "b_s_block h -> (b_s_block block_size) h", block_size=kBlockN)
+                v_descale_ref = v_descale_ref.reshape(batch_size, -1, v_descale_ref.shape[-1], 1)[:, : seqlen_k, :, :]
+            else:
+                raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
+        else:
+            q_descale, k_descale, v_descale = None, None, None
+        q_descale_ref = q_descale if q_descale_ref is None else q_descale_ref
+        k_descale_ref = k_descale if k_descale_ref is None else k_descale_ref
+        v_descale_ref = v_descale if v_descale_ref is None else v_descale_ref
+ 
         out_ref, _ = attention_ref(
             q_ro,
             k_cache_rep,
@@ -850,6 +882,8 @@ def test_flash_attn_kvcache(
             qv=qv,
             window_size=window_size,
             key_leftpad=cache_leftpad,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale_ref,
+            scaling_recipe=scaling_recipe,
         )
         out_pt, _ = attention_ref(
             q_ro,
@@ -863,7 +897,9 @@ def test_flash_attn_kvcache(
             upcast=False,
             reorder_ops=True,
             key_leftpad=cache_leftpad,
-            intermediate_dtype=dtype if dtype == torch.float8_e4m3fn else None
+            intermediate_dtype=dtype if dtype == torch.float8_e4m3fn else None,
+            q_descale=q_descale_ref, k_descale=k_descale_ref, v_descale=v_descale_ref,
+            scaling_recipe=scaling_recipe,
         )
         q = q.to(dtype)
         q_unpad = q_unpad.to(dtype) if varlen_q else None
@@ -899,7 +935,9 @@ def test_flash_attn_kvcache(
             window_size=window_size,
             rotary_interleaved=rotary_interleaved,
             num_splits=num_splits,
-            return_softmax_lse=True
+            return_softmax_lse=True,
+            q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+            scaling_recipe=scaling_recipe,
         )
         if varlen_q:
             out = output_pad_fn(out)

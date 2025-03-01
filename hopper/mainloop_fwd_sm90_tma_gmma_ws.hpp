@@ -865,22 +865,26 @@ struct CollectiveMainloopFwdSm90 {
             }
         }
 
-        auto load_K = [&] (int const n_block, auto const& smem_pipe_write, auto need_seqlenk_masking_type) {
+        auto load_K = [&] (int const n_block, auto const& smem_pipe_write, auto need_seqlenk_masking_type, bool should_load_scales) {
             pipeline_k.producer_acquire(smem_pipe_write);
             if constexpr (!PagedKV) {
+                if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                    if (should_load_scales) {
+                        copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
+                        // copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
+                        pipeline_k.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
+                    }
+                }                
                 copy(params.tma_load_K.with(*pipeline_k.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tKgK_TMA(_, n_block), tKsK_TMA(_, smem_pipe_write.index()));
-                if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
-                    // copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
-                    pipeline_k.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
-                }                
             } else {
                 constexpr bool Seqlenk_mask = decltype(need_seqlenk_masking_type)::value;
                 paged_kv_manager.template load_K<Seqlenk_mask>(n_block, sK_pi(_, _, smem_pipe_write.index()));
                 if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
-                    // copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
+                    if (should_load_scales) {
+                        copy(scale_copy_k_per_block, tKgK_per_block_scale(_, n_block), tKsK_per_block_scale(_, smem_pipe_write.index()));
+                        // copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
+                    }
                 }
                 pipeline_k.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
             }
@@ -892,31 +896,47 @@ struct CollectiveMainloopFwdSm90 {
             if constexpr (!PagedKV) {
                 copy(params.tma_load_V.with(*pipeline_v_load.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                     tVgVt_TMA(_, n_block), tVsVt_TMA(_, smem_pipe_write.index()));
-                if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
-                    pipeline_v_load.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
-                }                
             } else {
                 constexpr bool Seqlenk_mask = decltype(need_seqlenk_masking_type)::value;
                 paged_kv_manager.template load_V<Seqlenk_mask>(n_block, sVcpasync(_, _, smem_pipe_write.index()));
-                if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
-                    copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
-                }
                 pipeline_v_load.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
             }
         };
 
-        auto copy_Vt_to_V = [&] (auto const& smem_pipe_write) {
+        auto copy_Vt_to_V = [&] (int const n_block, auto const& smem_pipe_write, bool should_load_scales) {
             // Instead of maintaining smem_pipe_read as a separate variable, we can just use smem_pipe_write,
             // and exploit the invariance that smem_pipe_write.phase() == smem_pipe_read.phase() ^ 1.
             // This saves 1 or 2 registers.
             PipelineState smem_pipe_read{smem_pipe_write.index(), smem_pipe_write.phase() ^ 1, smem_pipe_write.count()};
             pipeline_vt.consumer_wait(smem_pipe_read);
             pipeline_v.producer_acquire(smem_pipe_write);
+            if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                if (should_load_scales) {
+                    // Tensor sV_per_block_scale = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v_scale.data()), SmemLayoutKPerBlockScale{});
+                    // if (blockIdx.x == 8 && blockIdx.y == 0 && blockIdx.z == 0) {
+                    //     CUTE_LOG(
+                    //         "producer load v_descale, n_block: %d, smem_pipe_write.index(): %d, sV_per_block_scale(1): %f, sV_per_block_scale(0): %f, src: %f, dst: %f\n",
+                    //         n_block, smem_pipe_write.index(), sV_per_block_scale(1), sV_per_block_scale(0), tVgV_per_block_scale(_0{}, n_block), tVsV_per_block_scale(_0{}, smem_pipe_write.index())
+                    //     );
+                    // }
+                    copy(scale_copy_v_per_block, tVgV_per_block_scale(_, n_block), tVsV_per_block_scale(_, smem_pipe_write.index()));
+                }
+            }                
             transpose_V(smem_pipe_write.index());
             // SMEM fence to make sure V is transposed before math
             cutlass::arch::fence_view_async_shared();
-            pipeline_v.producer_commit(smem_pipe_write);
+            if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
+                if (should_load_scales) {
+                    pipeline_v.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
+                    // if (blockIdx.x == 8 && blockIdx.y == 0 && blockIdx.z == 0) {
+                    // CUTE_LOG("clock: %lld, after producer commit, n_block: %d, smem_pipe_write: %d, phase: %d\n", clock64(), n_block, smem_pipe_write.index(), smem_pipe_write.phase());
+                    // }
+                } else {
+                    pipeline_v.producer_commit(smem_pipe_write);
+                }
+            } else {
+                pipeline_v.producer_commit(smem_pipe_write);
+            }
             // Very important: PipelineTmaAsync::consumer_release assumes that the warpgroup is synchronized
             // before calling. Without this we get race conditions.
             cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::ProducerWG) /*id*/);
@@ -928,7 +948,9 @@ struct CollectiveMainloopFwdSm90 {
         int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
         // If this is true, we're guaranteed that only the first warp will execute this function
         static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
-        bool should_load_KV = !Use_TMA_KV || ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync());
+        bool elected = cute::elect_one_sync();
+        bool should_load_KV = !Use_TMA_KV || ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && elected);
+        bool should_load_scales = ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && elected);
 
         if (should_load_KV) {
             if constexpr (PagedKV) {
@@ -936,7 +958,7 @@ struct CollectiveMainloopFwdSm90 {
             }
             if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
             // if (thread_idx == 0) { printf("Producer: main load, before load_K, index = %d\n", smem_pipe_write.index());}
-            load_K(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/);
+            load_K(n_block, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/, should_load_scales);
             // if (thread_idx == 0) { printf("Producer: main load, after load K, index = %d\n", smem_pipe_write.index());}
         }
 
@@ -1010,7 +1032,7 @@ struct CollectiveMainloopFwdSm90 {
                     paged_kv_manager.template load_page_table<false /*Seqlenk_mask*/>(n_block);
                 }
                 if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/); }
-                load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/);
+                load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/, should_load_scales);
             }
             if (should_load_KV) {
                 if constexpr (!Transpose_V) {
@@ -1021,8 +1043,8 @@ struct CollectiveMainloopFwdSm90 {
                     }
                 }
             }
+            if constexpr (Transpose_V) { copy_Vt_to_V(n_block_prev, smem_pipe_write_v, should_load_scales); }
             n_block_prev = n_block;
-            if constexpr (Transpose_V) { copy_Vt_to_V(smem_pipe_write_v); }
         }
         // if constexpr (Is_local) {
         // Disable sink token code for now
@@ -1038,7 +1060,7 @@ struct CollectiveMainloopFwdSm90 {
                         paged_kv_manager.template load_page_table<false /*Seqlenk_mask*/>(n_block);
                     }
                     if constexpr (Transpose_V) { load_V(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/); }
-                    load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/);
+                    load_K(n_block, smem_pipe_write, cute::false_type{} /*Seqlenk_mask*/, should_load_scales);
                     if constexpr (!Transpose_V) {
                         if constexpr (IntraWGOverlap) {
                             load_V(n_block_prev, smem_pipe_write_v, cute::true_type{} /*Seqlenk_mask*/);
@@ -1055,7 +1077,7 @@ struct CollectiveMainloopFwdSm90 {
         if constexpr (!Transpose_V && IntraWGOverlap) {
             if (should_load_KV) { load_V(n_block_prev, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
         }
-        if constexpr (Transpose_V) { copy_Vt_to_V(smem_pipe_write); }
+        if constexpr (Transpose_V) { copy_Vt_to_V(n_block_prev, smem_pipe_write, should_load_scales); }
         ++smem_pipe_write;
         // At the end, all threads have the correct smem_pipe_write.
         ++work_idx;
@@ -1306,16 +1328,16 @@ struct CollectiveMainloopFwdSm90 {
                     static constexpr int Row = 0;
                     float ratio = tKscale_col(1) / tKscale_col(0);
 
-                    // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                    // CUTE_LOG("k_descale(%d): %f, prev: %f\n", n_block, tKscale_col(1), tKscale_col(0));
+                    // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                    // CUTE_LOG("inside s_fn: k_descale(%d): %f, prev: %f\n", n_block, tKscale_col(1), tKscale_col(0));
                     // }
 
                     #pragma unroll
                     for (int m = 0; m < size<Row>(tSrS_rowcol); ++m) {
                         // CUTE_LOG("q_descale (%d): %f\n", m, tQscale_row(m));
                         tQscale_row(m) *= ratio;
-                        // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                        // CUTE_LOG("n_block: %d, ratio: %f, q_descale x k_ratio (%d): %f\n", n_block, ratio, m, tQscale_row(m));
+                        // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                        // CUTE_LOG("inside s_fn: n_block: %d, ratio: %f, q_descale x k_ratio (%d): %f\n", n_block, ratio, m, tQscale_row(m));
                         // }
                     }
                }
@@ -1411,6 +1433,9 @@ struct CollectiveMainloopFwdSm90 {
                     if constexpr (kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
                         tKscale_col(0) = 1.0f;
                         tKscale_col(1) = sK_per_scale(smem_pipe_read.index());
+                        // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                        //     CUTE_LOG("loaded: k_descale(%d): %f, prev: %f\n", n_block, tKscale_col(1), tKscale_col(0));
+                        // }
                     }
                     return tKscale_col;
                 } else {
@@ -1494,13 +1519,20 @@ struct CollectiveMainloopFwdSm90 {
                     tKscale_col(0) = tKscale_col(1); 
                     tKscale_col(1) = sK_per_scale(smem_pipe_read.index());
                     // tVscale_row(2) = sV_per_scale(smem_pipe_read.index());
-                    // if (threadIdx.x == 128 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                    //     CUTE_LOG("k_descale(%d): %f, prev: %f\n", n_block - 1, tKscale_col(1), tKscale_col(0));
+                    // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                    //     CUTE_LOG("loaded: k_descale(%d): %f, prev: %f\n", n_block - 1, tKscale_col(1), tKscale_col(0));
                     // }
                 }
 
                 if constexpr(!HasQv) {
-                    if (!UseSchedulerBarrier || warp_group_idx == 0) { consumer_wait(pipeline_v, smem_pipe_read_v); }
+                    if (!UseSchedulerBarrier || warp_group_idx == 0) { 
+                        // if (blockIdx.x == 256 && bidb == 8 && bidh == 0 && m_block == 1) {
+                        // CUTE_LOG("clock64: %lld, before consumer wait, n_block: %d, smem_pipe_read_v.idx: %d, smem_pipe_read_v.phase: %d\n", clock64(), n_block, smem_pipe_read_v.index(), smem_pipe_read_v.phase());
+                        // }
+                        consumer_wait(pipeline_v, smem_pipe_read_v); }
+                        // if (blockIdx.x == 256 && bidb == 8 && bidh == 0 && m_block == 1) {
+                        // CUTE_LOG("clock64: %lld, after consumer wait, n_block: %d, smem_pipe_read_v.idx: %d, smem_pipe_read_v.phase: %d\n", clock64(), n_block, smem_pipe_read_v.index(), smem_pipe_read_v.phase());
+                        // }
                 }
                 if constexpr (RescaleOBeforeGemm) { 
                     if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
@@ -1509,6 +1541,12 @@ struct CollectiveMainloopFwdSm90 {
                         // }
                         tVscale_row(0) = tVscale_row(1);
                         tVscale_row(1) = sV_per_scale(smem_pipe_read_v.index());
+                        // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                        //     CUTE_LOG(
+                        //         "loaded: v_descale(n_block=%d, smem_pipe_read_v.index()=%d, phase() = %d): %f, prev: %f\n", 
+                        //         n_block, smem_pipe_read_v.index(), smem_pipe_read_v.phase(), tVscale_row(1), tVscale_row(0)
+                        //     );
+                        // }
                         softmax.rescale_o</*use_additional_scale=*/true>(tOrO, scores_scale, tVscale_row(0) / tVscale_row(1)); 
                     } else {
                         softmax.rescale_o(tOrO, scores_scale); 
@@ -1544,6 +1582,9 @@ struct CollectiveMainloopFwdSm90 {
                 if constexpr (!HasQv) {
                     warpgroup_wait<0>();
                     pipeline_v.consumer_release(smem_pipe_read_v);  // release V
+                    // if (bidb == 8 && bidh == 0 && m_block == 1 && (threadIdx.x == 128 || threadIdx.x == 256)) {
+                    // CUTE_LOG("clock64: %lld, after consumer release, n_block: %d, smem_pipe_read_v.idx: %d, smem_pipe_read_v.phase: %d\n", clock64(), n_block, smem_pipe_read_v.index(), smem_pipe_read_v.phase());
+                    // }
                 }
                 if constexpr (Is_FP8 && !V_colmajor) { flash::permute_Cregs_fp8(tSrS); }
                 convert_type_out(make_tensor(tSrS.data(), tOrP.layout()), tOrP);
@@ -1600,7 +1641,12 @@ struct CollectiveMainloopFwdSm90 {
             // Tell producers that smem_q is ready
             cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
             // CUTE_LOG("%s\n", "after consumer arrive");
-            if constexpr (!HasQv) { consumer_wait(pipeline_v, smem_pipe_read); }
+            if constexpr (!HasQv) { 
+                consumer_wait(pipeline_v, smem_pipe_read); 
+                // if (bidb == 8 && bidh == 0 && m_block == 1 && (threadIdx.x == 128 || threadIdx.x == 256)) {
+                // CUTE_LOG("clock64: %lld, after consumer wait, n_block: %d, smem_pipe_read.idx: %d, smem_pipe_read.phase: %d\n", clock64(), n_block, smem_pipe_read.index(), smem_pipe_read.phase());
+                // }
+            }
             if constexpr (RescaleOBeforeGemm) { 
                 if constexpr (Is_FP8 && kScalingRecipe == ScalingRecipe::PerQTokenKVBlock) {
                     // if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 128) {
@@ -1608,6 +1654,9 @@ struct CollectiveMainloopFwdSm90 {
                     // }
                     tVscale_row(0) = tVscale_row(1);
                     tVscale_row(1) = sV_per_scale(smem_pipe_read.index());
+                    // if ((threadIdx.x == 128 || threadIdx.x == 256) && bidb == 8 && bidh == 0 && m_block == 1) {
+                    //     CUTE_LOG("loaded: v_descale(%d): %f, prev: %f\n", n_block, tVscale_row(1), tVscale_row(0));
+                    // }
                     softmax.rescale_o</*use_additional_scale=*/true>(tOrO, scores_scale, tVscale_row(0) / tVscale_row(1)); 
                     // tVscale_row(0) = tVscale_row(1);
                     // tVscale_row(1) = tVscale_row(2);
@@ -1624,6 +1673,9 @@ struct CollectiveMainloopFwdSm90 {
             }
             warpgroup_wait<0>();
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
+            // if (bidb == 8 && bidh == 0 && m_block == 1 && (threadIdx.x == 128 || threadIdx.x == 256)) {
+            // CUTE_LOG("clock64: %lld, after consumer release, n_block: %d, smem_pipe_read.idx: %d, smem_pipe_read.phase: %d\n", clock64(), n_block, smem_pipe_read.index(), smem_pipe_read.phase());
+            // }
             softmax.rescale_o(tOrO, scores_scale); 
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
             ++smem_pipe_read;
