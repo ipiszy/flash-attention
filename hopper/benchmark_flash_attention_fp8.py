@@ -225,24 +225,31 @@ torch.manual_seed(0)
 
 repeats = 30
 device = 'cuda'
-# dtype = torch.float16
+dtype = torch.float16
 dtype = torch.float8_e4m3fn
 is_gqa = True
 
+# For prefill
+# q_seqlen_val = None
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4224), (2, 8448), (1, 8448 * 2)]
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 8192 * 2)]
 bs_seqlen_vals = [(1, 2048 * 8)]
 # bs_seqlen_vals = [(32, 8192), (32, 2048)]
-# q_seqlen_val = 1
-q_seqlen_val = None
+
+# For decode 
+q_seqlen_val = 1
+# q_seqlen_val = 4
 # bs_seqlen_vals = [(1, 128)]
 # bs_seqlen_vals = [(4, 4096), (2, 8192), (1, 8192 * 2)]
 # bs_seqlen_vals = [(32, 512), (16, 1024), (8, 2048)]
+bs_seqlen_vals = [(32, 8192*4), (32, 8192*2), (32, 8192), (32, 4096), (32, 2048), (32, 1024), (64, 8192*2), (128, 8192), (128, 4096), (128, 2048), (128, 1024)]
+
+
 # causal_vals = [False, True]
 causal_vals = [True]
 # headdim_vals = [64, 128, 256]
 headdim_vals = [128]
-dim = 2048
+dim = 128 * 5
 # dim = 256
 dropout_p = 0.0
 
@@ -319,7 +326,7 @@ for causal in causal_vals:
             else:
                 raise ValueError(f"Unsupported scaling recipe: {scaling_recipe}")
 
-            print(f"{q_descale.shape=}, {q_descale.stride()=}, {k_descale.shape=}, {k_descale.stride()=}", flush=True)
+            # print(f"{q_descale.shape=}, {q_descale.stride()=}, {k_descale.shape=}, {k_descale.stride()=}", flush=True)
 
             # f = time_fwd(flash_attn_func, q, k, v, causal=causal, repeats=repeats, verbose=False)
             f = time_fwd(
@@ -341,8 +348,8 @@ for causal in causal_vals:
                 window_size=(-1,-1),
                 sink_token_length=0,
                 softcap=0.0,
-                # num_splits=4,
-                # pack_gqa=True,
+                num_splits=0,
+                pack_gqa=None,
                 sm_margin=0,
                 scaling_recipe=scaling_recipe,
                 repeats=repeats, 

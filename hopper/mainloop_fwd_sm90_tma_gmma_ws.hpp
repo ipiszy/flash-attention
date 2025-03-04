@@ -494,12 +494,12 @@ struct CollectiveMainloopFwdSm90 {
             SmemLayoutQ{},
             TileShape_MNK{},
             ClusterShape{}); // no mcast for Q
-        printf("mQ: \n");
-        print(mQ);
-        printf("\n");
-        printf("tma_load_Q: \n");
-        print(tma_load_Q);
-        printf("\n");
+        // printf("mQ: \n");
+        // print(mQ);
+        // printf("\n");
+        // printf("tma_load_Q: \n");
+        // print(tma_load_Q);
+        // printf("\n");
         // Tensor mQ_per_token_scale = make_tensor(
         //     make_gmem_ptr(args.ptr_q_descale), 
         //     args.shape_q_descale, args.stride_q_descale);
@@ -508,12 +508,12 @@ struct CollectiveMainloopFwdSm90 {
         //     mQ_per_token_scale,
         //     SmemLayoutQPerTokenScale{},
         //     ClusterShape{}); // no mcast for Q
-        printf("mQ_per_token_scale shape: \n");
-        print(args.shape_q_descale);
-        printf("\n");
-        printf("mQ_per_token_scale stride: \n");
-        print(args.stride_q_descale);
-        printf("\n");
+        // printf("mQ_per_token_scale shape: \n");
+        // print(args.shape_q_descale);
+        // printf("\n");
+        // printf("mQ_per_token_scale stride: \n");
+        // print(args.stride_q_descale);
+        // printf("\n");
         // printf("mQ_per_token_scale: \n");
         // print(mQ_per_token_scale);
         // printf("\n");
