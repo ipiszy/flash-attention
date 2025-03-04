@@ -29,3 +29,19 @@ var/
 
 # Dev
 venv
+
+# cuda
+*.i
+*.ii
+*.gpu
+*.ptx
+*.module_id
+*.cubin
+*.fatbin
+*.fatbin.c
+*.o
+*.cudafe1.cpp
+*.cudafe1.c
+*.cudafe1.gpu
+*.cudafe1.stub.c
+

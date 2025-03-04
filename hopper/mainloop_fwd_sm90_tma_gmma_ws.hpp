@@ -768,12 +768,16 @@ struct CollectiveMainloopFwdSm90 {
                 ThrCopy thr_scale_copy_k = scale_copy_k_per_block.get_slice(threadIdx.x);
                 Tensor mK_per_block_scale = make_tensor(make_gmem_ptr(params.ptr_k_descale), params.shape_k_descale, params.stride_k_descale)(_, bidh_kv);
                 Tensor gK_per_block_scale = local_tile(
-                    domain_offset(make_coord((seqlen_info.seqlen_k + kBlockN - 1) / kBlockN * bidb_kv), mK_per_block_scale), 
+                    domain_offset(make_coord((seqlen_info.seqlen_k_static + kBlockN - 1) / kBlockN * bidb_kv), mK_per_block_scale), 
                     make_shape(_1{}), make_coord(_));  // ((ATOM), ATOM_NUM)
-                // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+                // if (threadIdx.x == 0 && blockIdx.x == 1 && blockIdx.y == 0 && blockIdx.z == 0) {
                 //     printf("mK_per_block_scale: \n");
                 //     print(mK_per_block_scale);
                 //     print_tensor(mK_per_block_scale);
+                //     printf("\n");
+                //     printf("gK_per_block_scale: \n");
+                //     print(gK_per_block_scale);
+                //     print_tensor(gK_per_block_scale);
                 //     printf("\n");
                 // }
                 Tensor tKgK_per_block_scale = group_modes<0, 2>(thr_scale_copy_k.partition_S(gK_per_block_scale));
@@ -792,12 +796,12 @@ struct CollectiveMainloopFwdSm90 {
                 ThrCopy thr_scale_copy_v = scale_copy_v_per_block.get_slice(threadIdx.x);
                 Tensor mV_per_block_scale = make_tensor(make_gmem_ptr(params.ptr_v_descale), params.shape_v_descale, params.stride_v_descale)(_, bidh_kv);
                 Tensor gV_per_block_scale = local_tile(
-                    domain_offset(make_coord((seqlen_info.seqlen_k + kBlockN - 1) / kBlockN * bidb_kv), mV_per_block_scale), 
+                    domain_offset(make_coord((seqlen_info.seqlen_k_static + kBlockN - 1) / kBlockN * bidb_kv), mV_per_block_scale), 
                     make_shape(_1{}), make_coord(_));  // ((ATOM), ATOM_NUM)
-                // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-                //     printf("mK_per_block_scale: \n");
-                //     print(mK_per_block_scale);
-                //     print_tensor(mK_per_block_scale);
+                // if (threadIdx.x == 0 && blockIdx.x == 1 && blockIdx.y == 0 && blockIdx.z == 0) {
+                //     printf("mV_per_block_scale: \n");
+                //     print(mV_per_block_scale);
+                //     print_tensor(mV_per_block_scale);
                 //     printf("\n");
                 // }
                 Tensor tVgV_per_block_scale = group_modes<0, 2>(thr_scale_copy_v.partition_S(gV_per_block_scale));
