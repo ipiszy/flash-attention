@@ -93,6 +93,15 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
             ", params.k_descale_len: ", std::to_string(params.k_descale_len), 
             ", params.seqlen_k: ", std::to_string(params.seqlen_k),
             ", batch_size_k: ", std::to_string(params.kv_batch_idx ? params.b_k : params.b));
+    } else if constexpr (Scaling_Recipe == ScalingRecipe::PerQKVToken) {
+        static constexpr int kMinContiguousElems = 4;
+        TORCH_CHECK(
+            params.k_descale_len == (params.seqlen_k + kMinContiguousElems - 1) / kMinContiguousElems * kMinContiguousElems * (params.kv_batch_idx ? params.b_k : params.b), 
+            "kv descale length must be equal to (seqlen_k + kMinContiguousElems - 1) / kMinContiguousElems * kMinContiguousElems * batch_size_k. "
+            "kMinContiguous: ", std::to_string(kMinContiguousElems), 
+            ", params.k_descale_len: ", std::to_string(params.k_descale_len), 
+            ", params.seqlen_k: ", std::to_string(params.seqlen_k),
+            ", batch_size_k: ", std::to_string(params.kv_batch_idx ? params.b_k : params.b));
     }
  
     typename CollectiveMainloop::StrideV v_strides =

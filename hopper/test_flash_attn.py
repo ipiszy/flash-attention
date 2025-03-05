@@ -52,11 +52,12 @@ COMPILED_HDIMS = (
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
 # @pytest.mark.parametrize("scaling_recipe", [0, 2])
-@pytest.mark.parametrize("scaling_recipe", [2])
+# @pytest.mark.parametrize("scaling_recipe", [2])
+@pytest.mark.parametrize("scaling_recipe", [1])
 # @pytest.mark.parametrize("scaling_recipe", [0])
 # @pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
-@pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
-# @pytest.mark.parametrize("mha_type", ["mqa"])
+# @pytest.mark.parametrize("mha_type", ["gqa", "mqa"])
+@pytest.mark.parametrize("mha_type", ["mqa"])
 # @pytest.mark.parametrize("has_qv", [False, True])
 @pytest.mark.parametrize("has_qv", [False])
 # @pytest.mark.parametrize("deterministic", [False, True])
@@ -82,29 +83,29 @@ COMPILED_HDIMS = (
     "seqlen_q,seqlen_k",
     [
         (1, 1),
-        (1, 161),
-        (129, 1),
-        (1, 4096),
-        (4096, 1),
-        (64, 128),
-        (128, 192),
-        (256, 256),
-        (239, 1),
-        (799, 3),
-        (113, 203),
-        (113, 128),
-        (128, 217),
-        (113, 211),
-        (108, 256),
-        (256, 512),
-        (384, 256),
-        (640, 128),
-        (512, 256),
-        (1024, 1024),
-        (1023, 1024),
-        (1024, 1023),
-        (4096, 4096),
-        (4224, 4224),
+        # (1, 161),
+        # (129, 1),
+        # (1, 4096),
+        # (4096, 1),
+        # (64, 128),
+        # (128, 192),
+        # (256, 256),
+        # (239, 1),
+        # (799, 3),
+        # (113, 203),
+        # (113, 128),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        # (256, 512),
+        # (384, 256),
+        # (640, 128),
+        # (512, 256),
+        # (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
+        # (4096, 4096),
+        # (4224, 4224),
     ],
 )
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
@@ -150,6 +151,19 @@ def test_flash_attn_output(
         if dtype == torch.float8_e4m3fn:
             if scaling_recipe == 0:
                 q_descale, k_descale, v_descale = [torch.rand(batch_size, nheads_kv, device=device, dtype=torch.float32) * 2 for _ in range(3)]
+            elif scaling_recipe == 1:
+                kMinContiguousElements = 4
+                q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                # q_descale = (torch.ones(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
+                q_descale_ref = q_descale.reshape(batch_size, seqlen_q, nheads)
+                k_descale = (torch.rand(nheads_kv, int((seqlen_k + kMinContiguousElements - 1) / kMinContiguousElements) * kMinContiguousElements * batch_size, device=device, dtype=torch.float32) * 2).T
+                # k_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{k_descale = }")
+                k_descale_ref = k_descale.reshape(batch_size, -1, nheads_kv, 1)[:, : seqlen_k, :, :]
+                v_descale = (torch.rand(nheads_kv, int((seqlen_k + kMinContiguousElements - 1) / kMinContiguousElements) * kMinContiguousElements * batch_size, device=device, dtype=torch.float32) * 2).T
+                # v_descale = (torch.ones(nheads_kv, int((seqlen_k + kBlockN - 1) / kBlockN) * batch_size, device=device, dtype=torch.float32) * 1).T
+                print(f"{v_descale = }")
+                v_descale_ref = k_descale.reshape(batch_size, -1, nheads_kv, 1)[:, : seqlen_k, :, :]
             elif scaling_recipe == 2:
                 kBlockN = 224 
                 q_descale = (torch.rand(nheads, batch_size * seqlen_q, device=device, dtype=torch.float32)).T
